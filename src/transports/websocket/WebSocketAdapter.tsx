@@ -60,6 +60,20 @@ function WebSocketAdapter({
       userID: userId,
       server: zeroServer,
       schema,
+      // Default behavior is to call location.reload() on schema-version
+      // mismatch or missing client-state, which produces a continuous
+      // refresh loop in dev when the postgres publication doesn't match
+      // the client's declared schema. Log instead — the page stays
+      // mounted and the live-overlay subscriptions degrade gracefully
+      // (queries return empty rather than triggering a reload).
+      onUpdateNeeded: (reason) => {
+        // eslint-disable-next-line no-console
+        console.warn('[zero] update needed but auto-reload suppressed', reason);
+      },
+      onClientStateNotFound: () => {
+        // eslint-disable-next-line no-console
+        console.warn('[zero] client state not found but auto-reload suppressed');
+      },
     });
     cached = { zero, refcount: 0 };
     ZERO_CACHE.set(cacheKey, cached);
