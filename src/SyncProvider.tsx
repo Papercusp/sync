@@ -128,6 +128,8 @@ export function SyncProvider({
   restEndpoint,
   pollIntervalMs = 10_000,
   fallbackDelayMs = 10_000,
+  schema,
+  queries,
 }: SyncProviderProps) {
   const { activeTransport, onTransportError } = useTransportFallback({
     preferred: syncType,
@@ -170,7 +172,10 @@ export function SyncProvider({
     };
   }, [syncType, server, onTransportError]);
 
-  const commonProps = { userId, server, restEndpoint, pollIntervalMs, onTransportError };
+  // schema/queries are only used by the WebSocket transport; PollingAdapter
+  // ignores them safely. Threading both through commonProps keeps the call
+  // sites parallel.
+  const commonProps = { userId, server, restEndpoint, pollIntervalMs, onTransportError, schema, queries };
 
   // ── Transport selection ────────────────────────────────────────────────
   //

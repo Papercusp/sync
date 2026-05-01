@@ -1,10 +1,20 @@
-import { queries } from '@restart/zero';
-
 /**
- * Resolve a dot-separated query name into a ZQL expression.
- * E.g. 'products.page' -> queries.products.page(args)
+ * Resolve a dot-separated query name into a ZQL expression against a
+ * caller-supplied registry.
+ *
+ * E.g. 'products.page' -> registry.products.page(args)
+ *
+ * Previously this hardcoded `import { queries } from '@restart/zero'`,
+ * which forced consumers (operator, papercup app) that don't use the
+ * shop schema to install that package just for the WS transport. The
+ * registry is now passed in by SyncProvider so each app supplies its
+ * own — `@restart/zero` for shop, `@restart/zero-harness` for harness.
  */
-export function resolveQuery(queryName: string, args: Record<string, unknown>): any {
+export function resolveQuery(
+  queryName: string,
+  args: Record<string, unknown>,
+  queries: any,
+): any {
   // 'noop' and '' are sentinel values used by useSyncQuery when a hook
   // must fire unconditionally but the query is disabled. Zero's useQuery
   // still calls this resolver before checking `enabled`, so we return

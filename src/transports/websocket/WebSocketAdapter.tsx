@@ -3,9 +3,8 @@
 import { useEffect, useRef, useMemo, useCallback, type ReactNode } from 'react';
 import { Zero } from '@rocicorp/zero';
 import { ZeroProvider } from '@rocicorp/zero/react';
-import { schema } from '@restart/zero';
 import { SyncContext } from '../../SyncContext';
-import { useWebSocketQuery } from './useWebSocketQuery';
+import { createUseWebSocketQuery } from './useWebSocketQuery';
 import { clearPollingCache } from '../polling/queryClient';
 import type { SyncType } from '../../types';
 
@@ -16,6 +15,18 @@ interface WebSocketAdapterProps {
   restEndpoint?: string;
   pollIntervalMs?: number;
   onTransportError?: (error: Error) => void;
+  /**
+   * Zero schema for this app. Caller imports it from their app-specific
+   * package (e.g. `@restart/zero` for shop, `@restart/zero-harness` for
+   * harness). Required for WebSockets transport to construct the Zero
+   * client.
+   */
+  schema: any;
+  /**
+   * Named-query registry matching `schema`. Lookup-by-dot-name when
+   * useSyncQuery is called.
+   */
+  queries: any;
 }
 
 const DEFAULT_ZERO_SERVER =
@@ -33,7 +44,7 @@ const PROBE_TIMEOUT_MS = 10_000;
 // — 6+ simultaneous instances observed in practice. Each instance opens its
 // own WS, subscribes independently, and receives duplicate pokes, multiplying
 // client-side processing latency.
-type CachedZero = { zero: Zero<typeof schema>; refcount: number };
+type CachedZero = { zero: Zero<any>; refcount: number };
 const ZERO_CACHE: Map<string, CachedZero> = (() => {
   if (typeof window === 'undefined') return new Map();
   const w = window as unknown as { __RESTART_ZERO_CACHE__?: Map<string, CachedZero> };
@@ -46,10 +57,12 @@ function WebSocketAdapter({
   userId = 'anonymous',
   server,
   onTransportError,
+  schema,
+  queries,
 }: WebSocketAdapterProps) {
   const zeroServer = server ?? DEFAULT_ZERO_SERVER;
   const cacheKey = `${userId}|${zeroServer}`;
-  const zeroRef = useRef<Zero<typeof schema> | null>(null);
+  const zeroRef = useRef<Zero<any> | null>(null);
 
   // Look up or create the Zero instance for this (userId, server) pair from
   // the module-level cache. This survives component remounts and prevents
@@ -162,9 +175,12 @@ function WebSocketAdapter({
   }, [onTransportError]);
 
   const noop = useCallback(() => {}, []);
+  // Bind a queries-aware hook once per mount. Recomputes only if `queries`
+  // changes — typically a stable import from the consumer's schema package.
+  const useDataImpl = useMemo(() => createUseWebSocketQuery(queries), [queries]);
   const ctxValue = useMemo(
-    () => ({ transport: 'WEBSOCKETS' as SyncType, useDataImpl: useWebSocketQuery, prefetch: noop }),
-    [],
+    () => ({ transport: 'WEBSOCKETS' as SyncType, useDataImpl, prefetch: noop }),
+    [useDataImpl, noop],
   );
 
   return (

@@ -13,6 +13,20 @@ export interface SyncProviderProps {
   pollIntervalMs?: number;
   /** Seconds of WS disconnection before fallback. Default: 10_000 (10s). */
   fallbackDelayMs?: number;
+  /**
+   * Zero schema for the WebSocket transport. Required when syncType is
+   * 'WEBSOCKETS'. Polling-only consumers can omit it.
+   *
+   * Caller imports their app-specific schema package directly (e.g.
+   * `@restart/zero` for shop, `@restart/zero-harness` for harness) so
+   * @restart/sync stays schema-agnostic.
+   */
+  schema?: any;
+  /**
+   * Named-query registry matching `schema`. Required for WebSockets.
+   * Used to translate queryName → ZQL.
+   */
+  queries?: any;
 }
 
 export interface SyncQueryOptions {
