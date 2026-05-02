@@ -24,6 +24,20 @@ interface PollingAdapterProps {
 
 const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
 
+let warnedDefaultRestEndpoint = false;
+
+function warnIfDefaultUsedInProd(endpoint: string): void {
+  if (warnedDefaultRestEndpoint) return;
+  if (typeof window === 'undefined') return;
+  if (endpoint !== DEFAULT_REST_ENDPOINT) return;
+  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') return;
+  warnedDefaultRestEndpoint = true;
+  console.warn(
+    `[Sync] PollingAdapter has no \`restEndpoint\` or \`server\` prop on ${location.hostname}; using ${DEFAULT_REST_ENDPOINT}. ` +
+    'Pass `restEndpoint="/api/your-zero"` (relative) or `server="https://..."` to silence this.',
+  );
+}
+
 export function PollingAdapter({
   children,
   restEndpoint,
@@ -31,6 +45,7 @@ export function PollingAdapter({
   pollIntervalMs = 10_000,
 }: PollingAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
+  warnIfDefaultUsedInProd(endpoint);
   const queryClient = getQueryClient();
 
   const useDataImpl = useMemo(

@@ -59,10 +59,28 @@ const LazyWebSocketAdapter = lazy(
  */
 const WS_PROBE_MS = 1_500;
 
-const DEFAULT_ZERO_SERVER =
-  typeof window !== 'undefined'
-    ? ((window as unknown as { __ZERO_SERVER?: string }).__ZERO_SERVER ?? 'http://localhost:4848')
-    : 'http://localhost:4848';
+const LOCALHOST_ZERO_FALLBACK = 'http://localhost:4848';
+
+let warnedDefaultZeroServer = false;
+
+function resolveDefaultZeroServer(): string {
+  if (typeof window === 'undefined') return LOCALHOST_ZERO_FALLBACK;
+  const injected = (window as unknown as { __ZERO_SERVER?: string }).__ZERO_SERVER;
+  if (injected) return injected;
+  if (
+    !warnedDefaultZeroServer &&
+    location.hostname !== 'localhost' &&
+    location.hostname !== '127.0.0.1'
+  ) {
+    warnedDefaultZeroServer = true;
+    console.warn(
+      `[Sync] No \`server\` prop and no \`window.__ZERO_SERVER\` set on ${location.hostname}; falling back to ${LOCALHOST_ZERO_FALLBACK}. ` +
+      'WebSocket probe will fail and the provider will downgrade to POLLING. ' +
+      'Pass `server="https://your-zero-host"` or set `window.__ZERO_SERVER` before mount to silence this.',
+    );
+  }
+  return LOCALHOST_ZERO_FALLBACK;
+}
 
 type ProbeResult = 'unknown' | 'healthy' | 'blocked';
 
@@ -147,7 +165,7 @@ export function SyncProvider({
     if (typeof window === 'undefined') return;
     let cancelled = false;
 
-    const resolvedServer = server ?? DEFAULT_ZERO_SERVER;
+    const resolvedServer = server ?? resolveDefaultZeroServer();
     const startedAt = performance.now();
     // eslint-disable-next-line no-console
     console.info(`[Sync] WebSocket probe starting → ${resolvedServer} (${WS_PROBE_MS}ms timeout)`);

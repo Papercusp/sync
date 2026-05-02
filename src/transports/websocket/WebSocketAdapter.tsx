@@ -29,10 +29,27 @@ interface WebSocketAdapterProps {
   queries: any;
 }
 
-const DEFAULT_ZERO_SERVER =
-  typeof window !== 'undefined'
-    ? (window as any).__ZERO_SERVER ?? 'http://localhost:4848'
-    : 'http://localhost:4848';
+const LOCALHOST_ZERO_FALLBACK = 'http://localhost:4848';
+
+let warnedDefaultZeroServer = false;
+
+function resolveDefaultZeroServer(): string {
+  if (typeof window === 'undefined') return LOCALHOST_ZERO_FALLBACK;
+  const injected = (window as any).__ZERO_SERVER;
+  if (injected) return injected;
+  if (
+    !warnedDefaultZeroServer &&
+    location.hostname !== 'localhost' &&
+    location.hostname !== '127.0.0.1'
+  ) {
+    warnedDefaultZeroServer = true;
+    console.warn(
+      `[Sync] No \`server\` prop and no \`window.__ZERO_SERVER\` set on ${location.hostname}; using ${LOCALHOST_ZERO_FALLBACK}. ` +
+      'Pass `server` or set `window.__ZERO_SERVER` to your zero-cache origin to silence this.',
+    );
+  }
+  return LOCALHOST_ZERO_FALLBACK;
+}
 
 const PROBE_TIMEOUT_MS = 10_000;
 
@@ -60,7 +77,7 @@ function WebSocketAdapter({
   schema,
   queries,
 }: WebSocketAdapterProps) {
-  const zeroServer = server ?? DEFAULT_ZERO_SERVER;
+  const zeroServer = server ?? resolveDefaultZeroServer();
   const cacheKey = `${userId}|${zeroServer}`;
   const zeroRef = useRef<Zero<any> | null>(null);
 
