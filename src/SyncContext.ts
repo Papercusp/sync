@@ -22,10 +22,21 @@ export function useSyncContext(): SyncContextValue {
  *
  * Consumers pass `queryName` + `args` (strings and plain objects only).
  * The active transport adapter resolves these to the right data source.
+ *
+ * No-provider behaviour: returns `{data:undefined, loading:false, error:null}`
+ * with a stale-data flag set instead of throwing. Components mounted in app
+ * chrome (operator's ChromeShell renders RecentActionsCenter at the root
+ * layout) can render outside `/harness/*` where SyncProvider lives, and
+ * a thrown context error there crashes the popover. Callers that need
+ * live data should branch on the result and provide their own fallback
+ * (REST poll, prefetch cache, etc.) when no provider is mounted.
  */
 export function useSyncQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
-  const { useDataImpl } = useSyncContext();
-  return useDataImpl<T>(opts);
+  const ctx = useContext(SyncContext);
+  if (!ctx) {
+    return { data: undefined, loading: false, error: null } as unknown as SyncQueryResult<T>;
+  }
+  return ctx.useDataImpl<T>(opts);
 }
 
 /**
