@@ -33,6 +33,7 @@ import {
   createUsePollingQuery,
   createPrefetchSync,
 } from '../polling/usePollingQuery';
+import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
 import type { SyncType } from '../../types';
 
 interface SSEAdapterProps {
@@ -64,15 +65,19 @@ function SSESubscriber({
 
   useEffect(() => {
     if (typeof EventSource === 'undefined') return;
+    installSyncMetricsGlobal();
 
     let es: EventSource | null = null;
     let backoffMs = 1_000;
     const MAX_BACKOFF_MS = 30_000;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
+    let firstConnect = true;
 
     const connect = () => {
       if (cancelled) return;
+      if (!firstConnect) syncMetrics.sseReconnectAttempt();
+      firstConnect = false;
       try {
         es = new EventSource(`${endpoint}/sse`);
       } catch (e) {
@@ -82,12 +87,19 @@ function SSESubscriber({
 
       es.addEventListener('open', () => {
         backoffMs = 1_000; // reset backoff on successful connect
+        syncMetrics.sseConnected();
       });
 
       es.addEventListener('invalidate', (raw) => {
+        const data = (raw as MessageEvent).data as string;
         try {
-          const ev = JSON.parse((raw as MessageEvent).data) as InvalidateEvent;
-          if (!ev?.name) return;
+          const ev = JSON.parse(data) as InvalidateEvent & { tsMs?: number };
+          if (!ev?.name) {
+            syncMetrics.sseEventReceived(data?.length ?? 0);
+            return;
+          }
+          syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
+          syncMetrics.invalidateFromSse();
           if (ev.args) {
             queryClient.invalidateQueries({
               queryKey: ['sync', ev.name, ev.args],
@@ -102,13 +114,15 @@ function SSESubscriber({
             });
           }
         } catch {
-          /* malformed event — ignore */
+          syncMetrics.sseEventReceived(data?.length ?? 0);
+          /* malformed event — counter only, no invalidate */
         }
       });
 
       es.addEventListener('error', () => {
         // Browser auto-reconnects, but on hard failures it stops; rebuild.
         if (cancelled) return;
+        syncMetrics.sseDisconnected();
         es?.close();
         es = null;
         reconnectTimer = setTimeout(connect, backoffMs);
@@ -121,6 +135,7 @@ function SSESubscriber({
     return () => {
       cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      syncMetrics.sseDisconnected();
       es?.close();
     };
   }, [endpoint, queryClient, onError]);
