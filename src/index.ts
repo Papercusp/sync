@@ -1,5 +1,7 @@
 export { SyncProvider } from './SyncProvider';
 export { useSyncQuery, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
+export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';
+export type { SyncMetricsSnapshot } from './observability/metrics';
 export type {
   SyncType,
   SyncProviderProps,
