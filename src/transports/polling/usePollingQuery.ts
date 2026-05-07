@@ -10,8 +10,11 @@ interface PollingConfig {
   defaultPollIntervalMs: number;
 }
 
-const fetcher = async (url: string): Promise<{ rows: any[]; version: string }> => {
-  const res = await fetch(url);
+const fetcher = async (
+  url: string,
+  signal?: AbortSignal,
+): Promise<{ rows: any[]; version: string }> => {
+  const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`Polling query failed: HTTP ${res.status}`);
   return res.json();
 };
@@ -36,9 +39,16 @@ export function createUsePollingQuery(config: PollingConfig) {
     // accounted as hits below. This undercounts fetches that originate from
     // sources we don't observe (e.g. invalidateQueries from another tab via
     // BroadcastChannel) — acceptable at this granularity.
-    const queryFn = useCallback(() => {
+    //
+    // The `signal` argument here is what makes clearPollingCache() actually
+    // cancel in-flight network requests on the WS-takeover path. Without it,
+    // react-query's cancelQueries discards the result client-side but the
+    // server still completes ~10 SQL queries during the probe window for
+    // nothing. With it, fetch() rejects on the abort and the server-side
+    // request handler is killed (NextJS forwards req.signal).
+    const queryFn = useCallback(({ signal }: { signal: AbortSignal }) => {
       syncMetrics.cacheMiss();
-      return fetcher(url);
+      return fetcher(url, signal);
     }, [url]);
 
     const { data, isLoading, isFetching, isPlaceholderData, error, refetch } = useQuery({
@@ -92,7 +102,7 @@ export function createPrefetchSync(config: PollingConfig, queryClient: QueryClie
     }).toString()}`;
     void queryClient.prefetchQuery({
       queryKey: ['sync', queryName, args],
-      queryFn: () => fetcher(url),
+      queryFn: ({ signal }) => fetcher(url, signal),
       staleTime: 30_000,
     });
   };
