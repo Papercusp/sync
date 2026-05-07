@@ -16,14 +16,30 @@
  * Server contract:
  *   GET ${endpoint}/sse
  *     event: invalidate
- *     data: { "name": "queryName", "args"?: {...} }
+ *     data: { "name": "queryName", "args"?: {...}, "tsMs"?: <Date.now>  }
+ *
+ *     event: heartbeat                   ← required, every HEARTBEAT_INTERVAL_MS
+ *     data: { "tsMs": <Date.now> }
  *
  *   If `args` is absent, every cached entry under `name` invalidates.
+ *   `tsMs` (when present on invalidate) is used to populate
+ *   syncMetrics.lastEventLatencyMs. Heartbeats reset the client zombie watchdog.
+ *
+ *   Reconnect-replay: server SHOULD honor the `Last-Event-ID` header on
+ *   reconnect by replaying events with id > Last-Event-ID from a per-workspace
+ *   ring buffer. Not yet shipped on the client side either — pass 2.3.
  *
  * Why polling cadence is kept: SSE-driven invalidation is best-effort. A
  * dropped connection or a server bug shouldn't freeze panels. Polling acts
  * as the floor; SSE narrows the staleness window from poll-interval to
  * event-latency when both work.
+ *
+ * Resilience knobs (pass 1.3):
+ *   - Reconnect backoff with ±20% jitter — avoids thundering-herd reconnect
+ *     when many tabs disconnect simultaneously (e.g. server restart).
+ *   - Zombie watchdog — if no event AND no heartbeat for ZOMBIE_TIMEOUT_MS,
+ *     the connection is presumed hung and we force-reconnect. EventSource's
+ *     native `error` doesn't fire on quietly hung connections.
  */
 import { useEffect, useMemo, type ReactNode } from 'react';
 import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
@@ -70,9 +86,35 @@ function SSESubscriber({
     let es: EventSource | null = null;
     let backoffMs = 1_000;
     const MAX_BACKOFF_MS = 30_000;
+    // ZOMBIE_TIMEOUT_MS must be > server HEARTBEAT_INTERVAL_MS (15s) by enough
+    // margin to absorb network jitter; 30s gives one missed heartbeat of grace
+    // before we force-reconnect.
+    const ZOMBIE_TIMEOUT_MS = 30_000;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let zombieTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     let firstConnect = true;
+
+    /** ±20% jitter on the next backoff so simultaneously-disconnected tabs
+     *  don't reconnect in lockstep (thundering herd against a recovering server). */
+    const jitter = (ms: number) => ms * (0.8 + Math.random() * 0.4);
+
+    /** Reset the zombie watchdog after any signal of liveness (event or heartbeat). */
+    const resetZombieWatchdog = () => {
+      if (zombieTimer) clearTimeout(zombieTimer);
+      zombieTimer = setTimeout(() => {
+        if (cancelled) return;
+        // No event + no heartbeat in ZOMBIE_TIMEOUT_MS — force-rebuild even
+        // though EventSource hasn't fired `error`. This catches the proxy-
+        // hung-the-stream case where the browser thinks the socket is fine.
+        syncMetrics.sseDisconnected();
+        es?.close();
+        es = null;
+        const wait = jitter(backoffMs);
+        reconnectTimer = setTimeout(connect, wait);
+        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+      }, ZOMBIE_TIMEOUT_MS);
+    };
 
     const connect = () => {
       if (cancelled) return;
@@ -88,10 +130,18 @@ function SSESubscriber({
       es.addEventListener('open', () => {
         backoffMs = 1_000; // reset backoff on successful connect
         syncMetrics.sseConnected();
+        resetZombieWatchdog();
+      });
+
+      es.addEventListener('heartbeat', () => {
+        // Heartbeats carry no payload of interest beyond proving liveness;
+        // we don't bump eventsReceived because they aren't application events.
+        resetZombieWatchdog();
       });
 
       es.addEventListener('invalidate', (raw) => {
         const data = (raw as MessageEvent).data as string;
+        resetZombieWatchdog();
         try {
           const ev = JSON.parse(data) as InvalidateEvent & { tsMs?: number };
           if (!ev?.name) {
@@ -125,7 +175,8 @@ function SSESubscriber({
         syncMetrics.sseDisconnected();
         es?.close();
         es = null;
-        reconnectTimer = setTimeout(connect, backoffMs);
+        const wait = jitter(backoffMs);
+        reconnectTimer = setTimeout(connect, wait);
         backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
       });
     };
@@ -135,6 +186,7 @@ function SSESubscriber({
     return () => {
       cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (zombieTimer) clearTimeout(zombieTimer);
       syncMetrics.sseDisconnected();
       es?.close();
     };
