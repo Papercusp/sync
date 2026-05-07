@@ -48,6 +48,18 @@ export interface SyncQueryOptions {
    * view concept does not apply; cadence is controlled by `pollIntervalMs`).
    */
   ttl?: string | number;
+  /**
+   * Override the cache freshness window for this query (polling/SSE
+   * transports). When the cached entry is younger than `staleTime`, react-query
+   * serves it without a network round-trip on remount/refocus. Defaults to the
+   * QueryClient's global staleTime (5s). Use higher values (e.g. 30_000) for
+   * human-cadence data where a few seconds of staleness is acceptable; use 0
+   * for queries that must always refetch on key change.
+   *
+   * Ignored by the WebSocket transport (Zero materialized views are always
+   * fresh by construction).
+   */
+  staleTime?: number;
 }
 
 export interface SyncQueryResult<T = any> {

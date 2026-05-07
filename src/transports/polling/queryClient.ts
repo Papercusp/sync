@@ -16,6 +16,14 @@ export function getQueryClient(): QueryClient {
           gcTime: 60 * 60 * 1000,
           refetchOnWindowFocus: false,
           structuralSharing: true, // preserves unchanged refs across refetches
+          // Skip re-renders triggered by metadata-only flips (dataUpdatedAt,
+          // fetchStatus, failureCount, isStale). Consumers care about data,
+          // error, and the loading/fetching flags exposed via SyncQueryResult.
+          // Without this, a background refetch that returns structurally-equal
+          // data still flips dataUpdatedAt and fans out a render to every
+          // subscriber. Listed flags must include every property usePollingQuery
+          // reads from useQuery's return.
+          notifyOnChangeProps: ['data', 'error', 'isLoading', 'isFetching', 'isPlaceholderData'],
         },
       },
     });
