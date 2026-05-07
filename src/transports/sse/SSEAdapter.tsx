@@ -1,7 +1,18 @@
 'use client';
 
 /**
- * SSE Transport — real implementation.
+ * SSE Transport — real implementation, no current consumer.
+ *
+ * Status (2026-05-06): preserved-but-frozen. Both web and desktop deploys
+ * use Zero WS as their primary push transport; the polling adapter covers
+ * the degraded-mode fallback. No callsite in the codebase mounts this
+ * adapter via `syncType="SSE"`, and no server endpoint emits SSE invalidate
+ * events (the contract documented below is aspirational — see
+ * libs/sync/PASS_2_1_DECISION.md for why we paused work on it). Resilience
+ * knobs landed (jitter, zombie watchdog, heartbeat handling) but ship inert
+ * until a real consumer materializes.
+ *
+ * If you're considering reviving SSE: read PASS_2_1_DECISION.md first.
  *
  * Same fetcher as PollingAdapter (react-query against `${endpoint}/rest-query`)
  * plus an EventSource subscribed to `${endpoint}/sse` that pushes invalidation
