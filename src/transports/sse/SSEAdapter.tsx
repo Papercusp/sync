@@ -101,6 +101,13 @@ function SSESubscriber({
     // margin to absorb network jitter; 30s gives one missed heartbeat of grace
     // before we force-reconnect.
     const ZOMBIE_TIMEOUT_MS = 30_000;
+    // After this many consecutive connection failures with zero successful
+    // open events, escalate via onError so useTransportFallback can move
+    // to POLLING. Without this, an SSE adapter mounted against a missing
+    // server endpoint retries forever and the chain stalls.
+    const MAX_CONSECUTIVE_FAILURES = 3;
+    let consecutiveFailures = 0;
+    let escalated = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let zombieTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
@@ -140,6 +147,7 @@ function SSESubscriber({
 
       es.addEventListener('open', () => {
         backoffMs = 1_000; // reset backoff on successful connect
+        consecutiveFailures = 0;
         syncMetrics.sseConnected();
         resetZombieWatchdog();
       });
@@ -186,6 +194,19 @@ function SSESubscriber({
         syncMetrics.sseDisconnected();
         es?.close();
         es = null;
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && !escalated) {
+          escalated = true;
+          // Bubble to useTransportFallback so the chain advances to POLLING.
+          // Don't return — we still set a (long) reconnect timer in case the
+          // server comes back later; a successful connection resets escalated
+          // so the chain wouldn't re-fire repeatedly.
+          onError?.(
+            new Error(
+              `SSE connection to ${endpoint}/sse failed ${consecutiveFailures} consecutive times`,
+            ),
+          );
+        }
         const wait = jitter(backoffMs);
         reconnectTimer = setTimeout(connect, wait);
         backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
