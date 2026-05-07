@@ -22,7 +22,7 @@ const fetcher = async (url: string): Promise<{ rows: any[]; version: string }> =
 const EMPTY_ARRAY: readonly unknown[] = Object.freeze([]);
 export function createUsePollingQuery(config: PollingConfig) {
   return function usePollingQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
-    const { queryName, args = {}, pollIntervalMs, enabled = true } = opts;
+    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime } = opts;
     const interval = pollIntervalMs ?? config.defaultPollIntervalMs;
 
     const url = `${config.restEndpoint}/rest-query?${new URLSearchParams({
@@ -36,6 +36,7 @@ export function createUsePollingQuery(config: PollingConfig) {
       refetchInterval: interval,
       enabled,
       placeholderData: keepPreviousData,
+      ...(staleTime !== undefined ? { staleTime } : {}),
     });
 
     const invalidate = useCallback(() => { refetch(); }, [refetch]);
