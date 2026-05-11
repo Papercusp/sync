@@ -1,5 +1,26 @@
 # Pass 2.1 — Path A vs Path B decision
 
+> **⚠️ SUPERSEDED 2026-05-07.** This document is preserved for archival. The
+> "stop investing in SSE" decision below was reversed one day later when the
+> desktop deployment model crystallized:
+>
+> - **Desktop (Tauri) is the shipping product.** Webapp is for testing only.
+> - **SSE is the production push transport on desktop.** PG LISTEN/NOTIFY →
+>   `apps/operator/app/api/zero-harness/sse/route.ts` → `SSEAdapter`.
+> - Zero WS remains primary on the browser test path; SSE acts as fallback there.
+>
+> Source of truth: `apps/operator/providers/HarnessZeroProvider.tsx:6-19`. Also
+> see `/CLAUDE.md` § "Deployment model".
+>
+> The investigation and reasoning below were correct given the information at
+> the time (2026-05-06) — desktop ships embedded-pg, web ships zero-cache,
+> SSE-as-Zero-fallback had no consumer. What changed: the desktop SSE *server*
+> got built (the route now exists and is load-bearing), and the SSEAdapter
+> resilience knobs (jitter, zombie watchdog) became production-critical
+> infrastructure rather than aspirational code.
+
+---
+
 **Date:** 2026-05-06
 **Question:** Should we keep optimizing the SSE transport (Path A), or commit
 to Zero WS as the only push transport and let SSE rot as a thin fallback (Path B)?

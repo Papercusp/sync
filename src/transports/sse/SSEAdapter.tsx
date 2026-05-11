@@ -1,18 +1,25 @@
 'use client';
 
 /**
- * SSE Transport — real implementation, no current consumer.
+ * SSE Transport — desktop's PRIMARY push transport.
  *
- * Status (2026-05-06): preserved-but-frozen. Both web and desktop deploys
- * use Zero WS as their primary push transport; the polling adapter covers
- * the degraded-mode fallback. No callsite in the codebase mounts this
- * adapter via `syncType="SSE"`, and no server endpoint emits SSE invalidate
- * events (the contract documented below is aspirational — see
- * libs/sync/PASS_2_1_DECISION.md for why we paused work on it). Resilience
- * knobs landed (jitter, zombie watchdog, heartbeat handling) but ship inert
- * until a real consumer materializes.
+ * Status (2026-05-11): production. The shipping desktop app (Tauri) mounts
+ * this adapter via `syncType="SSE"` in HarnessZeroProvider whenever
+ * runtime === 'tauri' (detected via `__TAURI_INTERNALS__` +
+ * `/api/desktop/version` fingerprint). The server endpoint
+ * `apps/operator/app/api/zero-harness/sse/route.ts` emits invalidate /
+ * update / heartbeat events backed by PG LISTEN/NOTIFY. Resilience knobs
+ * (jitter, zombie watchdog, heartbeat handling, Last-Event-ID-ready) are
+ * load-bearing in production.
  *
- * If you're considering reviving SSE: read PASS_2_1_DECISION.md first.
+ * Browser (test / dev) defaults to Zero WS; SSE acts as a fallback there
+ * via useTransportFallback when WS fails. The webapp is not the production
+ * user surface — see /CLAUDE.md "Deployment model".
+ *
+ * Earlier header for archival: an older doc-comment (2026-05-06) called this
+ * adapter "preserved-but-frozen" alongside libs/sync/PASS_2_1_DECISION.md.
+ * That stance was reversed 2026-05-07 when desktop committed to SSE as
+ * primary; PASS_2_1_DECISION.md now carries a SUPERSEDED banner.
  *
  * Same fetcher as PollingAdapter (react-query against `${endpoint}/rest-query`)
  * plus an EventSource subscribed to `${endpoint}/sse` that pushes invalidation
@@ -72,27 +79,52 @@ interface SSEAdapterProps {
   onTransportError?: (error: Error) => void;
   schema?: unknown;
   queries?: unknown;
+  /** ?token=<value> appended to the SSE URL. EventSource can't carry headers. */
+  tokenQueryParam?: string;
+  /** Override the SSE endpoint path. Default: `${restEndpoint}/sse`. */
+  endpointOverride?: string;
+  /** Pause EventSource when document hidden >5min. */
+  visibilityPause?: boolean;
 }
 
 const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
+const VISIBILITY_PAUSE_MS = 5 * 60_000;
 
 interface InvalidateEvent {
   name: string;
   args?: Record<string, unknown>;
 }
 
+interface UpdateEvent {
+  name: string;
+  args?: Record<string, unknown>;
+  data: unknown[];
+}
+
 function SSESubscriber({
   endpoint,
   onError,
+  tokenQueryParam,
+  endpointOverride,
+  visibilityPause,
 }: {
   endpoint: string;
   onError?: (e: Error) => void;
+  tokenQueryParam?: string;
+  endpointOverride?: string;
+  visibilityPause?: boolean;
 }) {
   const queryClient = useQueryClient();
 
   useEffect(() => {
     if (typeof EventSource === 'undefined') return;
     installSyncMetricsGlobal();
+
+    // Build the SSE URL once; both the initial open and reconnects use it.
+    const baseUrl = endpointOverride ?? `${endpoint}/sse`;
+    const sseUrl = tokenQueryParam
+      ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenQueryParam)}`
+      : baseUrl;
 
     let es: EventSource | null = null;
     let backoffMs = 1_000;
@@ -139,7 +171,7 @@ function SSESubscriber({
       if (!firstConnect) syncMetrics.sseReconnectAttempt();
       firstConnect = false;
       try {
-        es = new EventSource(`${endpoint}/sse`);
+        es = new EventSource(sseUrl);
       } catch (e) {
         onError?.(e as Error);
         return;
@@ -174,7 +206,6 @@ function SSESubscriber({
               queryKey: ['sync', ev.name, ev.args],
             });
           } else {
-            // Drop all cached entries for this query name regardless of args.
             queryClient.invalidateQueries({
               predicate: (q) =>
                 Array.isArray(q.queryKey) &&
@@ -184,7 +215,40 @@ function SSESubscriber({
           }
         } catch {
           syncMetrics.sseEventReceived(data?.length ?? 0);
-          /* malformed event — counter only, no invalidate */
+        }
+      });
+
+      // Phase 1 payload-on-invalidate: server sends full result set inline,
+      // we drop straight into the cache (no refetch round-trip). Same name+args
+      // matching as `event: invalidate`. Cache value envelope `{rows, version}`
+      // matches what the polling fetcher returns from /rest-query.
+      es.addEventListener('update', (raw) => {
+        const data = (raw as MessageEvent).data as string;
+        resetZombieWatchdog();
+        try {
+          const ev = JSON.parse(data) as UpdateEvent & { tsMs?: number };
+          if (!ev?.name || !Array.isArray(ev.data)) {
+            syncMetrics.sseEventReceived(data?.length ?? 0);
+            return;
+          }
+          syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
+          syncMetrics.invalidateFromSse();
+          const cacheValue = { rows: ev.data, version: String(Date.now()) };
+          if (ev.args) {
+            queryClient.setQueryData(['sync', ev.name, ev.args], cacheValue);
+          } else {
+            queryClient.setQueriesData(
+              {
+                predicate: (q) =>
+                  Array.isArray(q.queryKey) &&
+                  q.queryKey[0] === 'sync' &&
+                  q.queryKey[1] === ev.name,
+              },
+              cacheValue,
+            );
+          }
+        } catch {
+          syncMetrics.sseEventReceived(data?.length ?? 0);
         }
       });
 
@@ -203,7 +267,7 @@ function SSESubscriber({
           // so the chain wouldn't re-fire repeatedly.
           onError?.(
             new Error(
-              `SSE connection to ${endpoint}/sse failed ${consecutiveFailures} consecutive times`,
+              `SSE connection to ${sseUrl} failed ${consecutiveFailures} consecutive times`,
             ),
           );
         }
@@ -213,16 +277,55 @@ function SSESubscriber({
       });
     };
 
+    // Visibility-pause: when the document hits hidden for VISIBILITY_PAUSE_MS,
+    // close the EventSource. Reopen on visibility return. Saves battery on
+    // phones and idle background tabs without affecting the polling fallback
+    // (which still ticks per pollIntervalMs while paused).
+    let hiddenSinceTimer: ReturnType<typeof setTimeout> | null = null;
+    let pausedByVisibility = false;
+    const onVisibilityChange = () => {
+      if (typeof document === 'undefined') return;
+      if (document.visibilityState === 'hidden') {
+        if (hiddenSinceTimer) return;
+        hiddenSinceTimer = setTimeout(() => {
+          hiddenSinceTimer = null;
+          if (cancelled) return;
+          if (!es) return;
+          pausedByVisibility = true;
+          syncMetrics.sseDisconnected();
+          es.close();
+          es = null;
+          if (zombieTimer) { clearTimeout(zombieTimer); zombieTimer = null; }
+          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        }, VISIBILITY_PAUSE_MS);
+      } else {
+        if (hiddenSinceTimer) { clearTimeout(hiddenSinceTimer); hiddenSinceTimer = null; }
+        if (pausedByVisibility) {
+          pausedByVisibility = false;
+          // Reset backoff so we connect immediately on return.
+          backoffMs = 1_000;
+          connect();
+        }
+      }
+    };
+    if (visibilityPause && typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange);
+    }
+
     connect();
 
     return () => {
       cancelled = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (zombieTimer) clearTimeout(zombieTimer);
+      if (hiddenSinceTimer) clearTimeout(hiddenSinceTimer);
+      if (visibilityPause && typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
       syncMetrics.sseDisconnected();
       es?.close();
     };
-  }, [endpoint, queryClient, onError]);
+  }, [endpoint, queryClient, onError, tokenQueryParam, endpointOverride, visibilityPause]);
 
   return null;
 }
@@ -233,6 +336,9 @@ export function SSEAdapter({
   server,
   pollIntervalMs = 10_000,
   onTransportError,
+  tokenQueryParam,
+  endpointOverride,
+  visibilityPause,
 }: SSEAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   const queryClient = getQueryClient();
@@ -242,17 +348,18 @@ export function SSEAdapter({
       createUsePollingQuery({
         restEndpoint: endpoint,
         defaultPollIntervalMs: pollIntervalMs,
+        tokenQueryParam,
       }),
-    [endpoint, pollIntervalMs],
+    [endpoint, pollIntervalMs, tokenQueryParam],
   );
 
   const prefetch = useMemo(
     () =>
       createPrefetchSync(
-        { restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs },
+        { restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam },
         queryClient,
       ),
-    [endpoint, pollIntervalMs, queryClient],
+    [endpoint, pollIntervalMs, tokenQueryParam, queryClient],
   );
 
   const ctxValue = useMemo(
@@ -263,7 +370,13 @@ export function SSEAdapter({
   return (
     <QueryClientProvider client={queryClient}>
       <SyncContext.Provider value={ctxValue}>
-        <SSESubscriber endpoint={endpoint} onError={onTransportError} />
+        <SSESubscriber
+          endpoint={endpoint}
+          onError={onTransportError}
+          tokenQueryParam={tokenQueryParam}
+          endpointOverride={endpointOverride}
+          visibilityPause={visibilityPause}
+        />
         {children}
       </SyncContext.Provider>
     </QueryClientProvider>
