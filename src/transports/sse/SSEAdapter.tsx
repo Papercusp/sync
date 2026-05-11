@@ -61,6 +61,7 @@
  */
 import { useEffect, useMemo, type ReactNode } from 'react';
 import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
+import { createResilientEventSource } from '@restart/sse';
 import { SyncContext } from '../../SyncContext';
 import { getQueryClient } from '../polling/queryClient';
 import {
@@ -126,85 +127,46 @@ function SSESubscriber({
       ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenQueryParam)}`
       : baseUrl;
 
-    let es: EventSource | null = null;
-    let backoffMs = 1_000;
-    const MAX_BACKOFF_MS = 30_000;
-    // ZOMBIE_TIMEOUT_MS must be > server HEARTBEAT_INTERVAL_MS (15s) by enough
-    // margin to absorb network jitter; 30s gives one missed heartbeat of grace
-    // before we force-reconnect.
-    const ZOMBIE_TIMEOUT_MS = 30_000;
-    // After this many consecutive connection failures with zero successful
-    // open events, escalate via onError so useTransportFallback can move
-    // to POLLING. Without this, an SSE adapter mounted against a missing
-    // server endpoint retries forever and the chain stalls.
-    const MAX_CONSECUTIVE_FAILURES = 3;
-    let consecutiveFailures = 0;
-    let escalated = false;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let zombieTimer: ReturnType<typeof setTimeout> | null = null;
-    let cancelled = false;
+    // Resilience (jitter, zombie watchdog, backoff, escalation, visibility
+    // pause) lives in @restart/sse's createResilientEventSource. This
+    // subscriber only owns the react-query invalidation/setQueryData
+    // wiring + syncMetrics calls. Behavior preserved verbatim against
+    // the pre-extraction implementation (libs/sse/src/client/resilient-event-source.ts
+    // is the literal port).
     let firstConnect = true;
 
-    /** ±20% jitter on the next backoff so simultaneously-disconnected tabs
-     *  don't reconnect in lockstep (thundering herd against a recovering server). */
-    const jitter = (ms: number) => ms * (0.8 + Math.random() * 0.4);
-
-    /** Reset the zombie watchdog after any signal of liveness (event or heartbeat). */
-    const resetZombieWatchdog = () => {
-      if (zombieTimer) clearTimeout(zombieTimer);
-      zombieTimer = setTimeout(() => {
-        if (cancelled) return;
-        // No event + no heartbeat in ZOMBIE_TIMEOUT_MS — force-rebuild even
-        // though EventSource hasn't fired `error`. This catches the proxy-
-        // hung-the-stream case where the browser thinks the socket is fine.
-        syncMetrics.sseDisconnected();
-        es?.close();
-        es = null;
-        const wait = jitter(backoffMs);
-        reconnectTimer = setTimeout(connect, wait);
-        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
-      }, ZOMBIE_TIMEOUT_MS);
-    };
-
-    const connect = () => {
-      if (cancelled) return;
-      if (!firstConnect) syncMetrics.sseReconnectAttempt();
-      firstConnect = false;
+    const handlePayload = (data: string, parse: 'update' | 'invalidate') => {
       try {
-        es = new EventSource(sseUrl);
-      } catch (e) {
-        onError?.(e as Error);
-        return;
-      }
-
-      es.addEventListener('open', () => {
-        backoffMs = 1_000; // reset backoff on successful connect
-        consecutiveFailures = 0;
-        syncMetrics.sseConnected();
-        resetZombieWatchdog();
-      });
-
-      es.addEventListener('heartbeat', () => {
-        // Heartbeats carry no payload of interest beyond proving liveness;
-        // we don't bump eventsReceived because they aren't application events.
-        resetZombieWatchdog();
-      });
-
-      es.addEventListener('invalidate', (raw) => {
-        const data = (raw as MessageEvent).data as string;
-        resetZombieWatchdog();
-        try {
-          const ev = JSON.parse(data) as InvalidateEvent & { tsMs?: number };
-          if (!ev?.name) {
-            syncMetrics.sseEventReceived(data?.length ?? 0);
-            return;
+        const ev = JSON.parse(data) as (InvalidateEvent | UpdateEvent) & { tsMs?: number };
+        if (!ev?.name) {
+          syncMetrics.sseEventReceived(data?.length ?? 0);
+          return;
+        }
+        if (parse === 'update' && !Array.isArray((ev as UpdateEvent).data)) {
+          syncMetrics.sseEventReceived(data?.length ?? 0);
+          return;
+        }
+        syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
+        syncMetrics.invalidateFromSse();
+        if (parse === 'update') {
+          const upd = ev as UpdateEvent;
+          const cacheValue = { rows: upd.data, version: String(Date.now()) };
+          if (upd.args) {
+            queryClient.setQueryData(['sync', upd.name, upd.args], cacheValue);
+          } else {
+            queryClient.setQueriesData(
+              {
+                predicate: (q) =>
+                  Array.isArray(q.queryKey) &&
+                  q.queryKey[0] === 'sync' &&
+                  q.queryKey[1] === upd.name,
+              },
+              cacheValue,
+            );
           }
-          syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
-          syncMetrics.invalidateFromSse();
+        } else {
           if (ev.args) {
-            queryClient.invalidateQueries({
-              queryKey: ['sync', ev.name, ev.args],
-            });
+            queryClient.invalidateQueries({ queryKey: ['sync', ev.name, ev.args] });
           } else {
             queryClient.invalidateQueries({
               predicate: (q) =>
@@ -213,117 +175,44 @@ function SSESubscriber({
                 q.queryKey[1] === ev.name,
             });
           }
-        } catch {
-          syncMetrics.sseEventReceived(data?.length ?? 0);
         }
-      });
-
-      // Phase 1 payload-on-invalidate: server sends full result set inline,
-      // we drop straight into the cache (no refetch round-trip). Same name+args
-      // matching as `event: invalidate`. Cache value envelope `{rows, version}`
-      // matches what the polling fetcher returns from /rest-query.
-      es.addEventListener('update', (raw) => {
-        const data = (raw as MessageEvent).data as string;
-        resetZombieWatchdog();
-        try {
-          const ev = JSON.parse(data) as UpdateEvent & { tsMs?: number };
-          if (!ev?.name || !Array.isArray(ev.data)) {
-            syncMetrics.sseEventReceived(data?.length ?? 0);
-            return;
-          }
-          syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
-          syncMetrics.invalidateFromSse();
-          const cacheValue = { rows: ev.data, version: String(Date.now()) };
-          if (ev.args) {
-            queryClient.setQueryData(['sync', ev.name, ev.args], cacheValue);
-          } else {
-            queryClient.setQueriesData(
-              {
-                predicate: (q) =>
-                  Array.isArray(q.queryKey) &&
-                  q.queryKey[0] === 'sync' &&
-                  q.queryKey[1] === ev.name,
-              },
-              cacheValue,
-            );
-          }
-        } catch {
-          syncMetrics.sseEventReceived(data?.length ?? 0);
-        }
-      });
-
-      es.addEventListener('error', () => {
-        // Browser auto-reconnects, but on hard failures it stops; rebuild.
-        if (cancelled) return;
-        syncMetrics.sseDisconnected();
-        es?.close();
-        es = null;
-        consecutiveFailures++;
-        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES && !escalated) {
-          escalated = true;
-          // Bubble to useTransportFallback so the chain advances to POLLING.
-          // Don't return — we still set a (long) reconnect timer in case the
-          // server comes back later; a successful connection resets escalated
-          // so the chain wouldn't re-fire repeatedly.
-          onError?.(
-            new Error(
-              `SSE connection to ${sseUrl} failed ${consecutiveFailures} consecutive times`,
-            ),
-          );
-        }
-        const wait = jitter(backoffMs);
-        reconnectTimer = setTimeout(connect, wait);
-        backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
-      });
-    };
-
-    // Visibility-pause: when the document hits hidden for VISIBILITY_PAUSE_MS,
-    // close the EventSource. Reopen on visibility return. Saves battery on
-    // phones and idle background tabs without affecting the polling fallback
-    // (which still ticks per pollIntervalMs while paused).
-    let hiddenSinceTimer: ReturnType<typeof setTimeout> | null = null;
-    let pausedByVisibility = false;
-    const onVisibilityChange = () => {
-      if (typeof document === 'undefined') return;
-      if (document.visibilityState === 'hidden') {
-        if (hiddenSinceTimer) return;
-        hiddenSinceTimer = setTimeout(() => {
-          hiddenSinceTimer = null;
-          if (cancelled) return;
-          if (!es) return;
-          pausedByVisibility = true;
-          syncMetrics.sseDisconnected();
-          es.close();
-          es = null;
-          if (zombieTimer) { clearTimeout(zombieTimer); zombieTimer = null; }
-          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        }, VISIBILITY_PAUSE_MS);
-      } else {
-        if (hiddenSinceTimer) { clearTimeout(hiddenSinceTimer); hiddenSinceTimer = null; }
-        if (pausedByVisibility) {
-          pausedByVisibility = false;
-          // Reset backoff so we connect immediately on return.
-          backoffMs = 1_000;
-          connect();
-        }
+      } catch {
+        syncMetrics.sseEventReceived(data?.length ?? 0);
       }
     };
-    if (visibilityPause && typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', onVisibilityChange);
-    }
 
-    connect();
+    const source = createResilientEventSource({
+      url: sseUrl,
+      initialBackoffMs: 1_000,
+      maxBackoffMs: 30_000,
+      jitter: 0.2,
+      // ZOMBIE_TIMEOUT_MS must be > server HEARTBEAT_INTERVAL_MS (15s) by
+      // enough margin to absorb network jitter; 30s = one missed-beat grace.
+      zombieTimeoutMs: 30_000,
+      // After 3 consecutive failures with zero successful opens, escalate
+      // via onError so useTransportFallback can move to POLLING.
+      maxConsecutiveFailures: 3,
+      visibilityPause,
+      visibilityPauseMs: VISIBILITY_PAUSE_MS,
+      handlers: {
+        heartbeat: () => { /* watchdog reset is handled inside the wrapper */ },
+        invalidate: (data) => handlePayload(data, 'invalidate'),
+        update:     (data) => handlePayload(data, 'update'),
+      },
+      onOpen: () => {
+        syncMetrics.sseConnected();
+      },
+      onStatusChange: (s) => {
+        if (s === 'connecting' && !firstConnect) syncMetrics.sseReconnectAttempt();
+        if (s === 'failing' || s === 'closed') syncMetrics.sseDisconnected();
+        if (s !== 'idle' && s !== 'closed') firstConnect = false;
+      },
+      onError,
+    });
 
     return () => {
-      cancelled = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (zombieTimer) clearTimeout(zombieTimer);
-      if (hiddenSinceTimer) clearTimeout(hiddenSinceTimer);
-      if (visibilityPause && typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-      }
       syncMetrics.sseDisconnected();
-      es?.close();
+      source.close();
     };
   }, [endpoint, queryClient, onError, tokenQueryParam, endpointOverride, visibilityPause]);
 
