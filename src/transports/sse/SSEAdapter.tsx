@@ -205,6 +205,10 @@ function SSESubscriber({
       onStatusChange: (s) => {
         if (s === 'connecting' && !firstConnect) syncMetrics.sseReconnectAttempt();
         if (s === 'failing' || s === 'closed') syncMetrics.sseDisconnected();
+        // 'idle' after firstConnect=false means we transitioned from a live
+        // connection (visibility-pause); the metric needs to fire so dashboards
+        // see the drop. Initial 'idle' (before any connect) is skipped.
+        if (s === 'idle' && !firstConnect) syncMetrics.sseDisconnected();
         if (s !== 'idle' && s !== 'closed') firstConnect = false;
       },
       onError,
