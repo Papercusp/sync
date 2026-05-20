@@ -1,6 +1,7 @@
 'use client';
 
-import { Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { lazyWithRetry as lazy } from './lazy-with-retry';
 import { PollingAdapter } from './transports/polling/PollingAdapter';
 import { useTransportFallback } from './fallback/useTransportFallback';
 import { WebSocketErrorBoundary } from './fallback/WebSocketErrorBoundary';
@@ -48,6 +49,13 @@ function PendingSyncAdapter({
 const LazyWebSocketAdapter = lazy(
   () => import('./transports/websocket/WebSocketAdapter'),
 );
+
+// Eager import — SSEAdapter is the primary path for desktop/operator and
+// was repeatedly failing to chunk-load in dev (turbopack hash staleness on
+// rapid SPA nav). Bundle cost is negligible vs the dev-mode flakiness it
+// removes.
+import { SSEAdapter as EagerSSEAdapter } from './transports/sse/SSEAdapter';
+const LazySSEAdapter = EagerSSEAdapter;
 
 /**
  * How long to wait for the up-front WebSocket handshake probe before falling
@@ -148,6 +156,9 @@ export function SyncProvider({
   fallbackDelayMs = 10_000,
   schema,
   queries,
+  tokenQueryParam,
+  endpointOverride,
+  visibilityPause,
 }: SyncProviderProps) {
   const { activeTransport, onTransportError } = useTransportFallback({
     preferred: syncType,
@@ -159,6 +170,17 @@ export function SyncProvider({
   const [wsHealthy, setWsHealthy] = useState<boolean | null>(
     syncType === 'WEBSOCKETS' ? null : false,
   );
+
+  // SSR/CSR parity: lazy adapters resolve differently on server (suspend →
+  // fallback) vs client (chunk loads → real subtree), causing a hydration
+  // mismatch. Defer mounting any lazy adapter until after first client
+  // commit by gating on `mounted`. Server and first client render both see
+  // `mounted === false` and render the same PendingSyncAdapter; the lazy
+  // chunk only mounts on the second client render.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     if (syncType !== 'WEBSOCKETS') return;
@@ -193,7 +215,11 @@ export function SyncProvider({
   // schema/queries are only used by the WebSocket transport; PollingAdapter
   // ignores them safely. Threading both through commonProps keeps the call
   // sites parallel.
-  const commonProps = { userId, server, restEndpoint, pollIntervalMs, onTransportError, schema, queries };
+  const commonProps = {
+    userId, server, restEndpoint, pollIntervalMs, onTransportError, schema, queries,
+    // SSE-only knobs — WS / polling adapters ignore them.
+    tokenQueryParam, endpointOverride, visibilityPause,
+  };
 
   // ── Transport selection ────────────────────────────────────────────────
   //
@@ -215,6 +241,30 @@ export function SyncProvider({
   // we never probe and wsHealthy stays false, so this branch is never taken.
   if (syncType === 'WEBSOCKETS' && activeTransport === 'WEBSOCKETS' && wsHealthy === null) {
     return <PendingSyncAdapter transport="WEBSOCKETS">{children}</PendingSyncAdapter>;
+  }
+
+  // SSR pass and first client render: render the empty passthrough so the
+  // server-side HTML matches what the client paints before useEffect fires.
+  // Avoids hydration mismatches from lazy() suspending differently on the
+  // server vs the client.
+  if (!mounted) {
+    return <PendingSyncAdapter transport={syncType}>{children}</PendingSyncAdapter>;
+  }
+
+  // SSE primary path — used by desktop/operator deployments. The SSEAdapter
+  // wraps the polling fetcher (initial load + post-invalidate refetch) and
+  // adds an EventSource subscriber that pushes invalidate/update events.
+  // Falls back to polling on repeated SSE failures via useTransportFallback.
+  if (syncType === 'SSE' && activeTransport === 'SSE') {
+    return (
+      <Suspense fallback={
+        <PendingSyncAdapter transport="SSE">{children}</PendingSyncAdapter>
+      }>
+        <LazySSEAdapter key="sse" {...commonProps}>
+          {children}
+        </LazySSEAdapter>
+      </Suspense>
+    );
   }
 
   const shouldUseWebSocket =

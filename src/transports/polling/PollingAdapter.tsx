@@ -13,6 +13,9 @@ interface PollingAdapterProps {
   server?: string;
   restEndpoint?: string;
   pollIntervalMs?: number;
+  /** When set, every `/rest-query` URL gets `?token=<encoded>` appended.
+   *  Mirrors the SSE adapter's `tokenQueryParam`. */
+  tokenQueryParam?: string;
   onTransportError?: (error: Error) => void;
   /** Accepted (and ignored) so SyncProvider can spread one commonProps
    *  shape into both adapters. The polling transport doesn't need a Zero
@@ -43,19 +46,20 @@ export function PollingAdapter({
   restEndpoint,
   server,
   pollIntervalMs = 10_000,
+  tokenQueryParam,
 }: PollingAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   warnIfDefaultUsedInProd(endpoint);
   const queryClient = getQueryClient();
 
   const useDataImpl = useMemo(
-    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs }),
-    [endpoint, pollIntervalMs],
+    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam }),
+    [endpoint, pollIntervalMs, tokenQueryParam],
   );
 
   const prefetch = useMemo(
-    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs }, queryClient),
-    [endpoint, pollIntervalMs, queryClient],
+    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam }, queryClient),
+    [endpoint, pollIntervalMs, tokenQueryParam, queryClient],
   );
 
   const ctxValue = useMemo(

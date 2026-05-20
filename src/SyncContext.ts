@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useCallback, useContext } from 'react';
+import { createContext, useContext } from 'react';
 import type { SyncType, UseDataImpl, SyncQueryResult, SyncQueryOptions, PrefetchSyncFn } from './types';
 
 interface SyncContextValue {

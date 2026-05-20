@@ -27,6 +27,33 @@ export interface SyncProviderProps {
    * Used to translate queryName → ZQL.
    */
   queries?: any;
+  /**
+   * When set, the SSE EventSource URL gets `?token=<value>` appended.
+   * For environments that auth via a query-string token because
+   * EventSource can't carry custom headers (e.g. mobile + JWT-gated
+   * `/api/mobile/sync/sse`).
+   *
+   * Only applied to the SSE transport; ignored by WS / polling.
+   */
+  tokenQueryParam?: string;
+  /**
+   * Override the default SSE endpoint path (which is `${restEndpoint}/sse`).
+   * Use the absolute path you want hit, e.g. `/api/mobile/sync/sse`.
+   *
+   * The polling fetcher still goes to `${restEndpoint}/rest-query` —
+   * this only affects the EventSource URL.
+   */
+  endpointOverride?: string;
+  /**
+   * When true, the SSE adapter pauses (closes the EventSource) once
+   * `document.visibilityState === 'hidden'` for VISIBILITY_PAUSE_MS,
+   * and reopens on next visibility return.
+   *
+   * Saves battery on phones and idle background tabs without breaking
+   * the polling fallback (which still ticks per `pollIntervalMs`).
+   * Default: false (preserves prior always-on behavior).
+   */
+  visibilityPause?: boolean;
 }
 
 export interface SyncQueryOptions {
