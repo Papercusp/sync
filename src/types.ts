@@ -31,14 +31,14 @@ export interface SyncProviderProps {
    * When set, the SSE EventSource URL gets `?token=<value>` appended.
    * For environments that auth via a query-string token because
    * EventSource can't carry custom headers (e.g. mobile + JWT-gated
-   * `/api/mobile/sync/sse`).
+   * `/api/device/sync/sse`).
    *
    * Only applied to the SSE transport; ignored by WS / polling.
    */
   tokenQueryParam?: string;
   /**
    * Override the default SSE endpoint path (which is `${restEndpoint}/sse`).
-   * Use the absolute path you want hit, e.g. `/api/mobile/sync/sse`.
+   * Use the absolute path you want hit, e.g. `/api/device/sync/sse`.
    *
    * The polling fetcher still goes to `${restEndpoint}/rest-query` —
    * this only affects the EventSource URL.
