@@ -61,7 +61,7 @@
  */
 import { useEffect, useMemo, type ReactNode } from 'react';
 import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
-import { createResilientEventSource } from '@restart/sse';
+import { createResilientEventSource } from '@papercusp/sse';
 import { SyncContext } from '../../SyncContext';
 import { getQueryClient } from '../polling/queryClient';
 import {
@@ -128,7 +128,7 @@ function SSESubscriber({
       : baseUrl;
 
     // Resilience (jitter, zombie watchdog, backoff, escalation, visibility
-    // pause) lives in @restart/sse's createResilientEventSource. This
+    // pause) lives in @papercusp/sse's createResilientEventSource. This
     // subscriber only owns the react-query invalidation/setQueryData
     // wiring + syncMetrics calls. Behavior preserved verbatim against
     // the pre-extraction implementation (libs/sse/src/client/resilient-event-source.ts
