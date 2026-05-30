@@ -27,6 +27,12 @@ interface WebSocketAdapterProps {
    * useSyncQuery is called.
    */
   queries: any;
+  /**
+   * Zero custom-mutator registry (`createMutators()`). When present, the Zero
+   * client is built with it, enabling optimistic `zero.mutate.*` writes
+   * exposed via `useSyncMutate`.
+   */
+  mutators?: any;
 }
 
 const LOCALHOST_ZERO_FALLBACK = 'http://localhost:4848';
@@ -76,6 +82,7 @@ function WebSocketAdapter({
   onTransportError,
   schema,
   queries,
+  mutators,
 }: WebSocketAdapterProps) {
   const zeroServer = server ?? resolveDefaultZeroServer();
   const cacheKey = `${userId}|${zeroServer}`;
@@ -90,6 +97,10 @@ function WebSocketAdapter({
       userID: userId,
       server: zeroServer,
       schema,
+      // Optimistic custom mutators (when the consumer supplies a registry).
+      // Built into the cached client; `zero.mutate.<ns>.<name>(args)` is then
+      // surfaced through SyncContext for useSyncMutate.
+      ...(mutators ? { mutators } : {}),
       // Default behavior is to call location.reload() on schema-version
       // mismatch or missing client-state, which produces a continuous
       // refresh loop in dev when the postgres publication doesn't match
@@ -196,7 +207,14 @@ function WebSocketAdapter({
   // changes — typically a stable import from the consumer's schema package.
   const useDataImpl = useMemo(() => createUseWebSocketQuery(queries), [queries]);
   const ctxValue = useMemo(
-    () => ({ transport: 'WEBSOCKETS' as SyncType, useDataImpl, prefetch: noop }),
+    () => ({
+      transport: 'WEBSOCKETS' as SyncType,
+      useDataImpl,
+      prefetch: noop,
+      // Zero's namespaced custom-mutator dispatcher — drives optimistic writes
+      // via useSyncMutate. Stable for the life of the cached Zero instance.
+      mutate: (zeroRef.current?.mutate ?? null) as Record<string, Record<string, (a: any) => Promise<unknown>>> | null,
+    }),
     [useDataImpl, noop],
   );
 
