@@ -62,7 +62,13 @@ export function useSyncMutate<A = unknown, R = unknown>(
   path: string,
   restFallback: (args: A) => Promise<R>,
 ): (args: A) => Promise<R> {
-  const { mutate } = useSyncContext();
+  // Tolerate being used OUTSIDE a <SyncProvider>: with no context there is no
+  // Zero client, so every call takes the REST fallback. This lets call sites
+  // (e.g. add-to-cart islands) adopt useSyncMutate without being wrapped in a
+  // provider yet — behavior-identical to a direct fetch until a provider + WS
+  // are added, at which point the same call site becomes optimistic for free.
+  const ctx = useContext(SyncContext);
+  const mutate = ctx?.mutate;
   return useCallback(
     async (args: A): Promise<R> => {
       const fn = resolveMutator(mutate, path);
