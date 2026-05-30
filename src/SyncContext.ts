@@ -1,12 +1,14 @@
 'use client';
 
 import { createContext, useCallback, useContext } from 'react';
-import type { SyncType, UseDataImpl, SyncQueryResult, SyncQueryOptions, PrefetchSyncFn } from './types';
+import type { SyncType, UseDataImpl, SyncQueryResult, SyncQueryOptions, PrefetchSyncFn, MutateImpl } from './types';
 
 interface SyncContextValue {
   transport: SyncType;
   useDataImpl: UseDataImpl;
   prefetch: PrefetchSyncFn;
+  /** Zero custom-mutator dispatcher (WS only); absent ⇒ writes use the REST fallback. */
+  mutate?: MutateImpl | null;
 }
 
 export const SyncContext = createContext<SyncContextValue | null>(null);
@@ -35,4 +37,40 @@ export function useSyncQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T
 export function useSyncPrefetch(): PrefetchSyncFn {
   const { prefetch } = useSyncContext();
   return prefetch;
+}
+
+function resolveMutator(
+  mutate: MutateImpl | null | undefined,
+  path: string,
+): ((args: any) => Promise<unknown>) | null {
+  if (!mutate) return null;
+  const [ns, name] = path.split('.');
+  const group = ns ? mutate[ns] : undefined;
+  const fn = group && name ? group[name] : undefined;
+  return typeof fn === 'function' ? fn.bind(group) : null;
+}
+
+/**
+ * Returns a write function for a namespaced Zero custom mutator (e.g.
+ * `'cart.addItem'`). On the WebSocket transport the mutator runs
+ * OPTIMISTICALLY through the Zero client (instant local apply, then server
+ * reconcile / rollback). On polling/SSE — where no Zero client exists — it
+ * calls `restFallback` so the surface works on every transport. Pass a
+ * stable `restFallback` (e.g. a `useCallback`).
+ */
+export function useSyncMutate<A = unknown, R = unknown>(
+  path: string,
+  restFallback: (args: A) => Promise<R>,
+): (args: A) => Promise<R> {
+  const { mutate } = useSyncContext();
+  return useCallback(
+    async (args: A): Promise<R> => {
+      const fn = resolveMutator(mutate, path);
+      if (fn) return (await fn(args)) as R;
+      return restFallback(args);
+    },
+    // path is constant per call site; restFallback expected stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mutate, path],
+  );
 }
