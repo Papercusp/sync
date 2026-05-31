@@ -4,11 +4,11 @@
  *
  * E.g. 'products.page' -> registry.products.page(args)
  *
- * Previously this hardcoded `import { queries } from '@restart/zero'`,
+ * Previously this hardcoded `import { queries } from '@papercusp/zero'`,
  * which forced consumers (operator, papercup app) that don't use the
  * shop schema to install that package just for the WS transport. The
  * registry is now passed in by SyncProvider so each app supplies its
- * own — `@restart/zero` for shop, `@restart/zero-harness` for harness.
+ * own — `@papercusp/zero` for shop, `@papercusp/zero-harness` for harness.
  */
 export function resolveQuery(
   queryName: string,

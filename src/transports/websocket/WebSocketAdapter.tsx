@@ -17,7 +17,7 @@ interface WebSocketAdapterProps {
   onTransportError?: (error: Error) => void;
   /**
    * Zero schema for this app. Caller imports it from their app-specific
-   * package (e.g. `@restart/zero` for shop, `@restart/zero-harness` for
+   * package (e.g. `@papercusp/zero` for shop, `@papercusp/zero-harness` for
    * harness). Required for WebSockets transport to construct the Zero
    * client.
    */

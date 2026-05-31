@@ -18,8 +18,8 @@ export interface SyncProviderProps {
    * 'WEBSOCKETS'. Polling-only consumers can omit it.
    *
    * Caller imports their app-specific schema package directly (e.g.
-   * `@restart/zero` for shop, `@restart/zero-harness` for harness) so
-   * @restart/sync stays schema-agnostic.
+   * `@papercusp/zero` for shop, `@papercusp/zero-harness` for harness) so
+   * @papercusp/sync stays schema-agnostic.
    */
   schema?: any;
   /**
