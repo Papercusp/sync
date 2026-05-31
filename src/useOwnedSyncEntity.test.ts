@@ -108,4 +108,30 @@ describe('useOwnedSyncEntity', () => {
     expect(read).toHaveBeenCalledTimes(1);
     expect(result.current.data).toEqual({ kind: 'read' });
   });
+
+  it('enabled:false is inert — no bootstrap; flipping true mounts it', async () => {
+    const bootstrap = vi.fn(async (): Promise<Shape> => ({ kind: 'seed' }));
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useOwnedSyncEntity<Row, Shape>({
+        queryName: 'x.current',
+        readId: () => 'cid',
+        bootstrap,
+        map: (r) => ({ kind: 'mapped', n: r.n }),
+        enabled,
+      }),
+      {
+        wrapper: wrapperFor(fakeCtx('POLLING', { data: [], loading: false })),
+        initialProps: { enabled: false },
+      },
+    );
+
+    // disabled: no bootstrap, settles to not-loading (so a hidden surface doesn't spin)
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(bootstrap).not.toHaveBeenCalled();
+
+    // flip enabled true → bootstrap mounts (e.g. navigating off /wholesale)
+    await act(async () => { rerender({ enabled: true }); });
+    await waitFor(() => expect(bootstrap).toHaveBeenCalledTimes(1));
+    expect(result.current.data).toEqual({ kind: 'seed' });
+  });
 });

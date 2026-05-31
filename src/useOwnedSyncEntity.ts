@@ -44,6 +44,11 @@ export interface UseOwnedSyncEntityOptions<TRow, TShape> {
   map: (row: TRow) => TShape;
   /** Shape when there's no id / no row yet. Default `null`. */
   empty?: TShape | null;
+  /** When false, the store is inert: no bootstrap, no Zero subscription, no
+   *  refresh — for conditionally-mounted surfaces (e.g. the quote-cart island is
+   *  suppressed on /wholesale). May flip true later (re-mounts the bootstrap).
+   *  Default true. */
+  enabled?: boolean;
 }
 
 export interface UseOwnedSyncEntityResult<TShape> {
@@ -83,6 +88,8 @@ export function useOwnedSyncEntity<TRow = unknown, TShape = unknown>(
   const ctx = useContext(SyncContext);
   const transport: SyncType = ctx?.transport ?? 'POLLING';
   const onWs = transport === 'WEBSOCKETS';
+  // Read directly from opts (not the ref) so a flip re-runs the gated effects.
+  const enabled = opts.enabled !== false;
 
   // Read callbacks via a ref so inline closures don't churn effect deps / loop
   // (the same hardening the data-fetch hook uses for its fetcher).
@@ -98,17 +105,17 @@ export function useOwnedSyncEntity<TRow = unknown, TShape = unknown>(
     () => (ref.current.buildArgs ?? ((x: string) => ({ id: x })))(id),
     [id],
   );
-  const q = useSyncQuery<TRow>({ queryName: opts.queryName, args, enabled: onWs && id.length > 0 });
+  const q = useSyncQuery<TRow>({ queryName: opts.queryName, args, enabled: enabled && onWs && id.length > 0 });
 
   // Invariant (a): seed until the query loads, then map.
   useEffect(() => {
-    if (!onWs) return;
+    if (!enabled || !onWs) return;
     setData((prev) =>
       selectOwnedData(prev, { loading: q.loading, row: q.data?.[0] }, { map: ref.current.map, empty: ref.current.empty ?? null }),
     );
     // Only the (enabled) query clears loading; for an absent id we wait for bootstrap.
     if (!q.loading && id.length > 0) { setLoading(false); setError(null); }
-  }, [onWs, q.data, q.loading, id]);
+  }, [enabled, onWs, q.data, q.loading, id]);
 
   const runFetch = useCallback(async (kind: 'bootstrap' | 'read') => {
     const fn = kind === 'read' ? (ref.current.read ?? ref.current.bootstrap) : ref.current.bootstrap;
@@ -127,17 +134,21 @@ export function useOwnedSyncEntity<TRow = unknown, TShape = unknown>(
   // Invariant (b): on WS the Zero subscription keeps the entity fresh — a REST
   // re-pull would clobber optimistic state, so refresh is a no-op there.
   const refresh = useCallback(
-    () => (onWs ? Promise.resolve() : runFetch('read')),
-    [onWs, runFetch],
+    () => (!enabled || onWs ? Promise.resolve() : runFetch('read')),
+    [enabled, onWs, runFetch],
   );
 
   // Explicit user retry — always re-runs bootstrap, both transports (see the
   // interface doc: no optimistic state to clobber on an error-retry).
-  const reload = useCallback(() => runFetch('bootstrap'), [runFetch]);
+  const reload = useCallback(
+    () => (enabled ? runFetch('bootstrap') : Promise.resolve()),
+    [enabled, runFetch],
+  );
 
   // Bootstrap on mount (both transports — it's the identity/cookie bootstrap +
-  // first-paint seed). Polling-only focus/route re-pull.
+  // first-paint seed). Polling-only focus/route re-pull. Inert while disabled.
   useEffect(() => {
+    if (!enabled) { setLoading(false); return; }
     void runFetch('bootstrap');
     if (typeof window === 'undefined') return;
     const reRead = () => { if (!onWs) void runFetch('read'); };
@@ -147,7 +158,7 @@ export function useOwnedSyncEntity<TRow = unknown, TShape = unknown>(
       window.removeEventListener('focus', reRead);
       document.removeEventListener('astro:page-load', reRead);
     };
-  }, [onWs, runFetch]);
+  }, [enabled, onWs, runFetch]);
 
   return { data, loading, error, transport, refresh, reload };
 }
