@@ -64,6 +64,30 @@ describe('useOwnedSyncEntity', () => {
     expect(result.current.data).toEqual({ kind: 'mapped', n: 7 });
   });
 
+  it('WS: reload re-runs bootstrap even though refresh is a no-op', async () => {
+    const query = { data: [] as Row[], loading: true };
+    const bootstrap = vi.fn(async (): Promise<Shape> => ({ kind: 'seed' }));
+    const read = vi.fn(async (): Promise<Shape> => ({ kind: 'read' }));
+    const { result } = renderHook(
+      () => useOwnedSyncEntity<Row, Shape>({
+        queryName: 'x.current',
+        readId: () => 'cid',
+        bootstrap,
+        read,
+        map: (r) => ({ kind: 'mapped', n: r.n }),
+      }),
+      { wrapper: wrapperFor(fakeCtx('WEBSOCKETS', query)) },
+    );
+
+    await waitFor(() => expect(bootstrap).toHaveBeenCalledTimes(1)); // mount bootstrap
+    await act(async () => { await result.current.refresh(); });
+    expect(read).not.toHaveBeenCalled();        // invariant (b): refresh is inert on WS
+
+    await act(async () => { await result.current.reload(); });
+    expect(bootstrap).toHaveBeenCalledTimes(2);  // explicit retry DOES re-bootstrap
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it('POLLING: bootstrap seeds, refresh re-pulls via read', async () => {
     const read = vi.fn(async (): Promise<Shape> => ({ kind: 'read' }));
     const { result } = renderHook(

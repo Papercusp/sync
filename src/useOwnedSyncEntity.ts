@@ -55,6 +55,11 @@ export interface UseOwnedSyncEntityResult<TShape> {
   transport: SyncType;
   /** Polling/SSE: re-pull via `read`. No-op on WS (Zero keeps it fresh) — invariant (b). */
   refresh: (opts?: { silent?: boolean }) => Promise<void>;
+  /** Explicit user-triggered re-run of `bootstrap` (getOrCreate) on BOTH
+   *  transports — for an error-retry affordance. Unlike `refresh`, it is NOT a
+   *  no-op on WS: an explicit retry after a failed load has no optimistic state
+   *  to clobber, so invariant (b) doesn't apply. Re-reads the id cookie too. */
+  reload: () => Promise<void>;
 }
 
 /**
@@ -126,6 +131,10 @@ export function useOwnedSyncEntity<TRow = unknown, TShape = unknown>(
     [onWs, runFetch],
   );
 
+  // Explicit user retry — always re-runs bootstrap, both transports (see the
+  // interface doc: no optimistic state to clobber on an error-retry).
+  const reload = useCallback(() => runFetch('bootstrap'), [runFetch]);
+
   // Bootstrap on mount (both transports — it's the identity/cookie bootstrap +
   // first-paint seed). Polling-only focus/route re-pull.
   useEffect(() => {
@@ -140,5 +149,5 @@ export function useOwnedSyncEntity<TRow = unknown, TShape = unknown>(
     };
   }, [onWs, runFetch]);
 
-  return { data, loading, error, transport, refresh };
+  return { data, loading, error, transport, refresh, reload };
 }
