@@ -2,6 +2,7 @@
   "name": "@papercusp/sync",
   "version": "0.0.1",
   "private": true,
+  "description": "Schema-agnostic Zero + SSE sync transports with reconnect/backpressure handling.",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "exports": {
