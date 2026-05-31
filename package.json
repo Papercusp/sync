@@ -9,6 +9,9 @@
     ".": { "types": "./src/index.ts", "import": "./src/index.ts", "default": "./src/index.ts" }
   },
   "sideEffects": false,
+  "scripts": {
+    "test": "vitest run"
+  },
   "dependencies": {
     "@tanstack/react-query": "^5.75.0"
   },
