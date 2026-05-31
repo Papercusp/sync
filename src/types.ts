@@ -19,7 +19,7 @@ export interface SyncProviderProps {
    *
    * Caller imports their app-specific schema package directly (e.g.
    * `@restart/zero` for shop, `@restart/zero-harness` for harness) so
-   * @restart/sync stays schema-agnostic.
+   * @papercusp/sync stays schema-agnostic.
    */
   schema?: any;
   /**

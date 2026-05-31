@@ -1,4 +1,4 @@
-# TESTING — @restart/sync
+# TESTING — @papercusp/sync
 
 ## What this project's tests cover
 
@@ -12,7 +12,7 @@
 
 | Edit touches                        | Run                                                       |
 | ----------------------------------- | --------------------------------------------------------- |
-| Anything in this workspace          | `npm test --workspace @restart/sync`                   |
+| Anything in this workspace          | `npm test --workspace @papercusp/sync`                   |
 | Code that other workspaces depend on| `npm run test:affected` from repo root             |
 
 See repo-root `CLAUDE.md` (`Tests after editing` block) and the unified
