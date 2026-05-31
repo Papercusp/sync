@@ -64,9 +64,9 @@ const PROBE_TIMEOUT_MS = 10_000;
 type CachedZero = { zero: Zero<any>; refcount: number };
 const ZERO_CACHE: Map<string, CachedZero> = (() => {
   if (typeof window === 'undefined') return new Map();
-  const w = window as unknown as { __RESTART_ZERO_CACHE__?: Map<string, CachedZero> };
-  if (!w.__RESTART_ZERO_CACHE__) w.__RESTART_ZERO_CACHE__ = new Map();
-  return w.__RESTART_ZERO_CACHE__;
+  const w = window as unknown as { __papercusp_zero_cache__?: Map<string, CachedZero> };
+  if (!w.__papercusp_zero_cache__) w.__papercusp_zero_cache__ = new Map();
+  return w.__papercusp_zero_cache__;
 })();
 
 function WebSocketAdapter({
