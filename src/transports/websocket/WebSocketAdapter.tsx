@@ -33,6 +33,13 @@ interface WebSocketAdapterProps {
    * exposed via `useSyncMutate`.
    */
   mutators?: any;
+  /**
+   * KV backend for the Zero replica. 'idb' (default) persists in IndexedDB;
+   * 'mem' keeps it in memory. 'mem' avoids Firefox's IndexedDB failure modes
+   * (connection auto-close → "Store is closed"; no IndexedDB in Private
+   * Browsing) that otherwise crash WS island hydration in Firefox.
+   */
+  kvStore?: 'mem' | 'idb';
 }
 
 const LOCALHOST_ZERO_FALLBACK = 'http://localhost:4848';
@@ -83,9 +90,10 @@ function WebSocketAdapter({
   schema,
   queries,
   mutators,
+  kvStore = 'idb',
 }: WebSocketAdapterProps) {
   const zeroServer = server ?? resolveDefaultZeroServer();
-  const cacheKey = `${userId}|${zeroServer}`;
+  const cacheKey = `${userId}|${zeroServer}|${kvStore}`;
   const zeroRef = useRef<Zero<any> | null>(null);
 
   // Look up or create the Zero instance for this (userId, server) pair from
@@ -97,6 +105,11 @@ function WebSocketAdapter({
       userID: userId,
       server: zeroServer,
       schema,
+      // KV backend for the local replica. 'mem' (shop default) keeps it in
+      // memory to dodge Firefox IndexedDB quirks ("Store is closed" /
+      // Private-Browsing no-IDB) that crash WS island hydration; 'idb'
+      // persists across reloads for consumers that opt in.
+      kvStore,
       // Optimistic custom mutators (when the consumer supplies a registry).
       // Built into the cached client; `zero.mutate.<ns>.<name>(args)` is then
       // surfaced through SyncContext for useSyncMutate.

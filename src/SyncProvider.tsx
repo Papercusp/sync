@@ -160,6 +160,7 @@ export function SyncProvider({
   endpointOverride,
   visibilityPause,
   mutators,
+  kvStore,
 }: SyncProviderProps) {
   const { activeTransport, onTransportError } = useTransportFallback({
     preferred: syncType,
@@ -218,6 +219,8 @@ export function SyncProvider({
   // sites parallel.
   const commonProps = {
     userId, server, restEndpoint, pollIntervalMs, onTransportError, schema, queries, mutators,
+    // WS-only knob — polling / SSE adapters ignore it.
+    kvStore,
     // SSE-only knobs — WS / polling adapters ignore them.
     tokenQueryParam, endpointOverride, visibilityPause,
   };

@@ -60,6 +60,19 @@ export interface SyncProviderProps {
    * route writes through the per-call REST fallback in `useSyncMutate`.
    */
   mutators?: any;
+  /**
+   * KV backend for the Zero replica on the WebSocket transport.
+   *   'idb' (default) — IndexedDB-backed, persists across reloads/sessions.
+   *   'mem'           — in-memory, re-synced from the server on every load.
+   *
+   * Use 'mem' to sidestep Firefox's IndexedDB quirks (aggressive
+   * connection-closing → Zero "Store is closed"; and no IndexedDB at all in
+   * Private Browsing), which otherwise crash WS island hydration in Firefox.
+   * Trade-off: loses local persistence (the server is the source of truth, so
+   * for server-synced state like the cart the cost is just a re-sync on load).
+   * Ignored by POLLING / SSE.
+   */
+  kvStore?: 'mem' | 'idb';
 }
 
 export interface SyncQueryOptions {
