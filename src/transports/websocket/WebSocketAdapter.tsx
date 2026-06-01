@@ -121,17 +121,24 @@ function WebSocketAdapter({
   }
   zeroRef.current = cached.zero;
 
-  // Refcount per mount; close + evict when the last consumer unmounts.
+  // Refcount per mount, but DO NOT close/evict the Zero client when the last
+  // consumer unmounts. Closing on refcount 0 caused a close→reopen race on the
+  // shared IndexedDB replica store during client-side (ClientRouter) navigation:
+  // the layout islands (cart, quote, search) all unmount as the page swaps →
+  // refcount hits 0 → the store closes → then the next page's islands remount,
+  // miss the (now-evicted) cache, and create a NEW Zero client that opens the
+  // same userID-keyed store while the old async close is still in flight.
+  // Chromium tolerates the overlap; Firefox throws "Store is closed" on the new
+  // client's first connect → island hydration crashes (React #418) → the page is
+  // frozen/unclickable. Keeping the singleton alive makes navigation a cache HIT
+  // (one client, one store, never closed mid-session); the browser reclaims it
+  // on page unload. Refcount is retained for diagnostics only.
   useEffect(() => {
     const entry = ZERO_CACHE.get(cacheKey);
     if (!entry) return;
     entry.refcount += 1;
     return () => {
       entry.refcount -= 1;
-      if (entry.refcount <= 0) {
-        try { entry.zero.close?.(); } catch { /* ignore */ }
-        ZERO_CACHE.delete(cacheKey);
-      }
     };
   }, [cacheKey]);
 
