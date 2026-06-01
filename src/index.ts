@@ -1,4 +1,5 @@
 export { SyncProvider } from './SyncProvider';
+export { lazyWithRetry, shouldAutoReloadChunkFailure } from './lazy-with-retry';
 export { useSyncQuery, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';
 export type { SyncMetricsSnapshot } from './observability/metrics';
