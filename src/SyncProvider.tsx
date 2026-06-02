@@ -136,12 +136,60 @@ function probeWebSocket(server: string, timeoutMs: number): Promise<ProbeResult>
   });
 }
 
+// ── Global WS-probe cache ───────────────────────────────────────────────────
+// The probe result is a property of (browser, server), NOT of any one provider
+// instance. Without a shared cache every island probes independently AND every
+// island re-probes on each ClientRouter navigation (islands remount on swap).
+// When the zero server is DOWN, each probe is a 1.5–4s failing WS connection;
+// many of them across islands × navigations churn the main thread and FREEZE
+// Firefox (Chromium degrades more gracefully). Caching the verdict once per
+// session means a dead server is detected ONCE → everything falls to POLLING
+// immediately with zero further WS attempts. The cache lives on `window` so it
+// is shared across islands/chunks and survives ClientRouter swaps; a full page
+// reload clears it (so recovery is just a refresh).
+type WsVerdict = 'healthy' | 'blocked';
+type WsProbeCache = { results: Map<string, WsVerdict>; inflight: Map<string, Promise<WsVerdict>> };
+function getWsProbeCache(): WsProbeCache {
+  if (typeof window === 'undefined') return { results: new Map(), inflight: new Map() };
+  const w = window as unknown as { __sync_ws_probe_cache__?: WsProbeCache };
+  if (!w.__sync_ws_probe_cache__) w.__sync_ws_probe_cache__ = { results: new Map(), inflight: new Map() };
+  return w.__sync_ws_probe_cache__;
+}
+
+/** Probe a server at most once per session. Concurrent callers share one probe. */
+function probeWebSocketOnce(server: string, timeoutMs: number): { cached: WsVerdict | null; promise: Promise<WsVerdict> } {
+  const cache = getWsProbeCache();
+  const existing = cache.results.get(server);
+  if (existing) return { cached: existing, promise: Promise.resolve(existing) };
+  let p = cache.inflight.get(server);
+  if (!p) {
+    const startedAt = typeof performance !== 'undefined' ? performance.now() : 0;
+    // eslint-disable-next-line no-console
+    console.info(`[Sync] WebSocket probe starting → ${server} (${timeoutMs}ms timeout)`);
+    if (typeof window !== 'undefined') (window as unknown as { __SYNC_PROBE__?: unknown }).__SYNC_PROBE__ = { status: 'probing', server, startedAt };
+    p = probeWebSocket(server, timeoutMs).then((result) => {
+      const verdict: WsVerdict = result === 'healthy' ? 'healthy' : 'blocked';
+      cache.results.set(server, verdict);
+      cache.inflight.delete(server);
+      const durationMs = typeof performance !== 'undefined' ? Math.round(performance.now() - startedAt) : 0;
+      if (typeof window !== 'undefined') (window as unknown as { __SYNC_PROBE__?: unknown }).__SYNC_PROBE__ = { status: result, server, durationMs };
+      // eslint-disable-next-line no-console
+      console.info(`[Sync] WebSocket probe ${result} in ${durationMs}ms → using ${verdict === 'healthy' ? 'WEBSOCKETS' : 'POLLING (REST fallback)'} (cached for session)`);
+      return verdict;
+    });
+    cache.inflight.set(server, p);
+  }
+  return { cached: null, promise: p };
+}
+
 /**
  * Renders a sync-transport provider. When `syncType === 'WEBSOCKETS'` we
  * first run a short health probe to check whether WebSocket upgrades work
  * in this browser. Only if the probe succeeds do we mount the Zero-powered
  * WebSocketAdapter. Otherwise we render the polling adapter immediately so
  * the page never shows a blank data region when WS is disabled or blocked.
+ * The probe result is cached per-session (see `probeWebSocketOnce`) so a dead
+ * server can never trigger repeated probe churn that freezes Firefox.
  *
  * Runtime WS failures after a successful probe are still handled by
  * `useTransportFallback` inside the WebSocketAdapter path.
@@ -169,9 +217,14 @@ export function SyncProvider({
 
   // null = probe in progress; true/false = decision made.
   // For non-WS preferred transports, no probe is needed — start ready.
-  const [wsHealthy, setWsHealthy] = useState<boolean | null>(
-    syncType === 'WEBSOCKETS' ? null : false,
-  );
+  // If a prior island already probed this server this session, read its cached
+  // verdict synchronously — no re-probe, no churn (the Firefox-freeze fix).
+  const [wsHealthy, setWsHealthy] = useState<boolean | null>(() => {
+    if (syncType !== 'WEBSOCKETS') return false;
+    if (typeof window === 'undefined') return null;
+    const cached = getWsProbeCache().results.get(server ?? resolveDefaultZeroServer());
+    return cached ? cached === 'healthy' : null;
+  });
 
   // SSR/CSR parity: lazy adapters resolve differently on server (suspend →
   // fallback) vs client (chunk loads → real subtree), causing a hydration
@@ -188,24 +241,26 @@ export function SyncProvider({
     if (syncType !== 'WEBSOCKETS') return;
     if (typeof window === 'undefined') return;
     let cancelled = false;
-
     const resolvedServer = server ?? resolveDefaultZeroServer();
-    const startedAt = performance.now();
-    // eslint-disable-next-line no-console
-    console.info(`[Sync] WebSocket probe starting → ${resolvedServer} (${WS_PROBE_MS}ms timeout)`);
-    (window as unknown as { __SYNC_PROBE__?: unknown }).__SYNC_PROBE__ = { status: 'probing', server: resolvedServer, startedAt };
 
-    probeWebSocket(resolvedServer, WS_PROBE_MS).then((result) => {
+    // probeWebSocketOnce dedupes: a session-cached verdict returns instantly
+    // (no new WS attempt), an in-flight probe is shared, and only the very
+    // first caller for this server actually opens a socket. This is what stops
+    // the per-island / per-navigation probe churn that freezes Firefox when
+    // the zero server is down.
+    const { cached, promise } = probeWebSocketOnce(resolvedServer, WS_PROBE_MS);
+    if (cached) {
+      setWsHealthy(cached === 'healthy');
+      if (cached === 'blocked') onTransportError(new Error('WebSocket blocked (cached this session)'));
+      return;
+    }
+    promise.then((verdict) => {
       if (cancelled) return;
-      const durationMs = Math.round(performance.now() - startedAt);
-      const healthy = result === 'healthy';
+      const healthy = verdict === 'healthy';
       setWsHealthy(healthy);
-      (window as unknown as { __SYNC_PROBE__?: unknown }).__SYNC_PROBE__ = { status: result, server: resolvedServer, durationMs };
-      // eslint-disable-next-line no-console
-      console.info(`[Sync] WebSocket probe ${result} in ${durationMs}ms → using ${healthy ? 'WEBSOCKETS' : 'POLLING (REST fallback)'}`);
       if (!healthy) {
         // Move the fallback chain WEBSOCKETS → SSE → POLLING so metadata matches.
-        onTransportError(new Error(`WebSocket probe to ${resolvedServer} did not open (${result})`));
+        onTransportError(new Error(`WebSocket probe to ${resolvedServer} blocked`));
       }
     });
 
