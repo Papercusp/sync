@@ -1,6 +1,8 @@
 export { SyncProvider } from './SyncProvider';
 export { lazyWithRetry, shouldAutoReloadChunkFailure } from './lazy-with-retry';
-export { useSyncQuery, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
+export { useSyncQuery, useSyncMutate, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
+export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
+export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';
 export type { SyncMetricsSnapshot } from './observability/metrics';
 export type {
@@ -9,6 +11,7 @@ export type {
   SyncQueryOptions,
   SyncQueryResult,
   PrefetchSyncFn,
+  MutateImpl,
 } from './types';
 
 export {

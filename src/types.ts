@@ -54,6 +54,12 @@ export interface SyncProviderProps {
    * Default: false (preserves prior always-on behavior).
    */
   visibilityPause?: boolean;
+  /**
+   * Zero custom-mutator registry (`createMutators()`) enabling optimistic
+   * writes on the WebSocket transport. Only used by WEBSOCKETS; polling/SSE
+   * route writes through the per-call REST fallback in `useSyncMutate`.
+   */
+  mutators?: any;
 }
 
 export interface SyncQueryOptions {
@@ -109,3 +115,10 @@ export type UseDataImpl = <T = any>(opts: SyncQueryOptions) => SyncQueryResult<T
 
 /** Eagerly cache a query result so a future useSyncQuery with the same key is instant. */
 export type PrefetchSyncFn = (opts: SyncQueryOptions) => void;
+
+/**
+ * Zero's `zero.mutate` dispatcher — namespaced custom mutators
+ * (`mutate.cart.addItem(args)`). Present only on the WebSocket transport;
+ * `null`/absent on polling/SSE (writes fall back to REST).
+ */
+export type MutateImpl = Record<string, Record<string, (args: any) => Promise<unknown>>>;

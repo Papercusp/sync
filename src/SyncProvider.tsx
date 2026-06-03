@@ -159,6 +159,7 @@ export function SyncProvider({
   tokenQueryParam,
   endpointOverride,
   visibilityPause,
+  mutators,
 }: SyncProviderProps) {
   const { activeTransport, onTransportError } = useTransportFallback({
     preferred: syncType,
@@ -216,7 +217,7 @@ export function SyncProvider({
   // ignores them safely. Threading both through commonProps keeps the call
   // sites parallel.
   const commonProps = {
-    userId, server, restEndpoint, pollIntervalMs, onTransportError, schema, queries,
+    userId, server, restEndpoint, pollIntervalMs, onTransportError, schema, queries, mutators,
     // SSE-only knobs — WS / polling adapters ignore them.
     tokenQueryParam, endpointOverride, visibilityPause,
   };
