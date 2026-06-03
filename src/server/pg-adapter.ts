@@ -27,15 +27,21 @@ import type { ListenSource, NotifySink } from './invalidation-bus';
  * adapters use. A real `postgres()` Sql satisfies this.
  */
 export interface PgSqlLike {
-  /** Tagged-template query, e.g. sql`SELECT pg_notify(${ch}, ${payload})`. */
-  (strings: TemplateStringsArray, ...args: unknown[]): Promise<unknown>;
-  /** Subscribe to a NOTIFY channel; resolves once the LISTEN is ready. */
+  /** Tagged-template query, e.g. sql`SELECT pg_notify(${ch}, ${payload})`.
+   *  Loosely typed (any) so a real postgres-js `Sql` — with its many call
+   *  overloads + PendingQuery return — structurally satisfies it. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (strings: TemplateStringsArray, ...args: any[]): any;
+  /** Subscribe to a NOTIFY channel; resolves once the LISTEN is ready.
+   *  `onListen` is accepted (postgres passes it) but unused here. */
   listen(
     channel: string,
     onNotify: (payload: string) => void,
+    onListen?: () => void,
   ): Promise<unknown>;
   /** Close the connection (optional in the structural type). */
-  end?(opts?: unknown): Promise<void>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  end?(...args: any[]): Promise<void>;
 }
 
 const DEFAULT_CHANNEL = 'sync_invalidate';
