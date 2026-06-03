@@ -1,0 +1,235 @@
+/**
+ * Invalidation bus — the server-push core of @papercusp/sync.
+ *
+ * Generic extraction of the operator's `sync-sse.ts`. One process-local
+ * bus fans a stream of invalidation/update events out to every connected
+ * SSE subscriber, with:
+ *   - a monotonic event id + an in-memory ring buffer for `Last-Event-ID`
+ *     reconnect replay (`backfillSince`),
+ *   - source-side dedupe so a periodic reconcile sweep that re-emits the
+ *     same `(name, args)` doesn't fan out a flicker storm,
+ *   - a 32KB payload cap (oversized → drop `data`, client refetches),
+ *   - an optional `bridge` that synthesizes extra events (e.g. a raw
+ *     PG-trigger `<schema>.<table>.changed` → the camelCase query names
+ *     that read that table).
+ *
+ * Transport is INJECTED, so the lib stays dependency-free:
+ *   - `ListenSource.start(onMessage)` feeds raw JSON event strings in
+ *     (the host wires this to PG `LISTEN`, a Redis sub, an in-process
+ *     emitter — anything).
+ *   - `NotifySink.notify(json)` sends an event out to all processes (the
+ *     host wires this to `pg_notify`, a Redis pub, etc). In a single
+ *     process the notify loops back through the ListenSource.
+ *
+ * The host's `notifyInvalidate(...)` call publishes via the sink; the sink
+ * delivery comes back through the listen source and is what actually fans
+ * out to subscribers — so multi-process deployments all see every event.
+ */
+
+export interface SyncEvent {
+  id: number;
+  ts: number;
+  name: string;
+  args?: Record<string, unknown>;
+  /** Optional full payload. Absent when oversized (>limit) or unknown —
+   *  client falls back to invalidate-then-refetch. */
+  data?: unknown[];
+}
+
+/** Inbound transport: deliver raw JSON event strings to `onMessage`. */
+export interface ListenSource {
+  start(onMessage: (raw: string) => void): Promise<void> | void;
+  stop?(): void | Promise<void>;
+}
+
+/** Outbound transport: publish a JSON payload to all processes. */
+export interface NotifySink {
+  notify(payloadJson: string): Promise<void>;
+}
+
+export interface SubscribeHandle {
+  send: (e: SyncEvent) => void;
+  close: () => void;
+}
+
+export interface CreateInvalidationBusOptions {
+  listen: ListenSource;
+  notify: NotifySink;
+  /** Ring-buffer retention for reconnect replay. Default 60_000. */
+  historyWindowMs?: number;
+  /** Suppress identical notifies within this window. Default 90_000. */
+  dedupeWindowMs?: number;
+  /** Serialized-payload byte cap; over → drop `data`. Default 32768. */
+  payloadSizeLimit?: number;
+  /** Synthesize extra query names from a raw event name (e.g. PG trigger). */
+  bridge?: (eventName: string) => readonly string[];
+  /** Injectable clock (testing). Default Date.now. */
+  now?: () => number;
+  onError?: (where: string, err: unknown) => void;
+  log?: (msg: string) => void;
+}
+
+export interface InvalidationBus {
+  /** Register an SSE subscriber. Lazily starts the ListenSource. */
+  subscribe(send: (e: SyncEvent) => void): Promise<SubscribeHandle>;
+  /** Events with id > lastEventId still inside the retention window. */
+  backfillSince(lastEventId: number): SyncEvent[];
+  /** Publish an invalidation (or data-bearing update) to all processes. */
+  notifyInvalidate(
+    name: string,
+    args?: Record<string, unknown>,
+    data?: unknown[],
+  ): Promise<void>;
+  /** Eagerly start the ListenSource (otherwise lazy on first subscribe). */
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  /** Inspection / tests. */
+  historySize(): number;
+}
+
+const DEFAULT_HISTORY_WINDOW_MS = 60_000;
+const DEFAULT_DEDUPE_WINDOW_MS = 90_000;
+const DEFAULT_PAYLOAD_SIZE_LIMIT = 32 * 1024;
+
+export function createInvalidationBus(
+  opts: CreateInvalidationBusOptions,
+): InvalidationBus {
+  const historyWindowMs = opts.historyWindowMs ?? DEFAULT_HISTORY_WINDOW_MS;
+  const dedupeWindowMs = opts.dedupeWindowMs ?? DEFAULT_DEDUPE_WINDOW_MS;
+  const payloadSizeLimit = opts.payloadSizeLimit ?? DEFAULT_PAYLOAD_SIZE_LIMIT;
+  const bridge = opts.bridge ?? (() => [] as const);
+  const now = opts.now ?? (() => Date.now());
+  const onError = opts.onError ?? (() => {});
+  const log = opts.log ?? (() => {});
+
+  let nextId = 1;
+  const history: SyncEvent[] = [];
+  const subscribers = new Set<{ send: (e: SyncEvent) => void }>();
+  const recentNotifies = new Map<string, number>();
+
+  let startPromise: Promise<void> | null = null;
+
+  function pruneHistory(): void {
+    const cutoff = now() - historyWindowMs;
+    while (history.length > 0 && history[0].ts < cutoff) history.shift();
+  }
+
+  function fanout(ev: SyncEvent): void {
+    history.push(ev);
+    pruneHistory();
+    for (const s of subscribers) {
+      try {
+        s.send(ev);
+      } catch {
+        /* best-effort — one bad subscriber must not break the fan-out */
+      }
+    }
+  }
+
+  function onMessage(raw: string): void {
+    let parsed: { name?: unknown; args?: unknown; data?: unknown };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (typeof parsed.name !== 'string') return;
+    const ev: SyncEvent = {
+      id: nextId++,
+      ts: now(),
+      name: parsed.name,
+      args:
+        parsed.args && typeof parsed.args === 'object' && !Array.isArray(parsed.args)
+          ? (parsed.args as Record<string, unknown>)
+          : undefined,
+      data: Array.isArray(parsed.data) ? parsed.data : undefined,
+    };
+    fanout(ev);
+
+    // Bridge: synthesize additional events (no args → full-name invalidate).
+    for (const bridgedName of bridge(parsed.name)) {
+      fanout({ id: nextId++, ts: now(), name: bridgedName });
+    }
+  }
+
+  function start(): Promise<void> {
+    if (!startPromise) {
+      startPromise = (async () => {
+        await opts.listen.start(onMessage);
+        log('[sync] invalidation bus listening');
+      })().catch((e) => {
+        // Reset so a later subscribe retries (matches the original behavior).
+        startPromise = null;
+        onError('listen.start', e);
+        throw e;
+      });
+    }
+    return startPromise;
+  }
+
+  async function subscribe(send: (e: SyncEvent) => void): Promise<SubscribeHandle> {
+    await start();
+    const sub = { send };
+    subscribers.add(sub);
+    return { send, close: () => void subscribers.delete(sub) };
+  }
+
+  function backfillSince(lastEventId: number): SyncEvent[] {
+    pruneHistory();
+    return history.filter((e) => e.id > lastEventId);
+  }
+
+  function pruneNotifyCache(ts: number): void {
+    if (recentNotifies.size < 200) return;
+    for (const [k, t] of recentNotifies) {
+      if (ts - t > dedupeWindowMs) recentNotifies.delete(k);
+    }
+  }
+
+  async function notifyInvalidate(
+    name: string,
+    args?: Record<string, unknown>,
+    data?: unknown[],
+  ): Promise<void> {
+    let payload: Record<string, unknown> = { name };
+    if (args !== undefined) payload.args = args;
+    if (data !== undefined) {
+      payload.data = data;
+      if (JSON.stringify(payload).length > payloadSizeLimit) {
+        payload = { name };
+        if (args !== undefined) payload.args = args;
+      }
+    }
+
+    // Source-side dedupe. Data-bearing notifies hash the data into the key
+    // so a NEW row set still gets through; pure invalidates collapse.
+    const dataKey = data === undefined ? '' : JSON.stringify(data);
+    const key = `${name}|${args ? JSON.stringify(args) : ''}|${dataKey}`;
+    const ts = now();
+    const last = recentNotifies.get(key);
+    if (last !== undefined && ts - last < dedupeWindowMs) return;
+    recentNotifies.set(key, ts);
+    pruneNotifyCache(ts);
+
+    try {
+      await opts.notify.notify(JSON.stringify(payload));
+    } catch (e) {
+      onError('notify', e);
+    }
+  }
+
+  async function stop(): Promise<void> {
+    subscribers.clear();
+    if (opts.listen.stop) await opts.listen.stop();
+    startPromise = null;
+  }
+
+  return {
+    subscribe,
+    backfillSince,
+    notifyInvalidate,
+    start,
+    stop,
+    historySize: () => history.length,
+  };
+}
