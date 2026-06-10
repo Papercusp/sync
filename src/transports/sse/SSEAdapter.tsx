@@ -69,6 +69,7 @@ import {
   createPrefetchSync,
 } from '../polling/usePollingQuery';
 import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
+import { emitSyncBusEvent, type SyncBusEvent } from '../../bus-tap';
 import type { SyncType } from '../../types';
 
 interface SSEAdapterProps {
@@ -148,6 +149,11 @@ function SSESubscriber({
         }
         syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
         syncMetrics.invalidateFromSse();
+        // Fan the raw event out to app-level listeners (bus-tap) so consumers
+        // like attention notifiers share THIS stream instead of opening their
+        // own EventSource against the same route (each standing stream costs a
+        // per-host browser socket).
+        emitSyncBusEvent(ev as SyncBusEvent);
         if (parse === 'update') {
           const upd = ev as UpdateEvent;
           const cacheValue = { rows: upd.data, version: String(Date.now()) };
