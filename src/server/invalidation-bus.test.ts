@@ -151,4 +151,66 @@ describe('invalidation-bus', () => {
     expect(bus.backfillSince(0)).toHaveLength(0);
     expect(bus.historySize()).toBe(0);
   });
+
+  // ── Audit P-066/P-067: dedupe key hashes data; stop() drains ──────────────
+
+  it('data-bearing notifies dedupe by content; a new row set passes (hashed key)', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 1000,
+    });
+    await bus.subscribe(() => {});
+
+    await bus.notifyInvalidate('q.rows', { k: 1 }, [{ a: 1 }]);
+    await bus.notifyInvalidate('q.rows', { k: 1 }, [{ a: 1 }]); // same data → suppressed
+    expect(lb.delivered).toHaveLength(1);
+
+    await bus.notifyInvalidate('q.rows', { k: 1 }, [{ a: 2 }]); // NEW data → through
+    expect(lb.delivered).toHaveLength(2);
+
+    // data-bearing and pure-invalidate forms are distinct keys
+    await bus.notifyInvalidate('q.rows', { k: 1 });
+    expect(lb.delivered).toHaveLength(3);
+  });
+
+  it('stop() drains in-flight notifies before stopping the listen source', async () => {
+    let releaseNotify!: () => void;
+    const gate = new Promise<void>((r) => (releaseNotify = r));
+    const sent: string[] = [];
+    let listenStopped = false;
+    const listen: ListenSource = {
+      start() {},
+      stop() {
+        listenStopped = true;
+      },
+    };
+    const notify: NotifySink = {
+      async notify(json) {
+        await gate; // hold the publish in flight
+        sent.push(json);
+      },
+    };
+    const bus = createInvalidationBus({ listen, notify });
+    await bus.start();
+
+    const pending = bus.notifyInvalidate('q.slow', { k: 1 }); // not awaited
+    let stopped = false;
+    const stopping = bus.stop().then(() => {
+      stopped = true;
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(stopped).toBe(false); // still draining
+    expect(listenStopped).toBe(false);
+
+    releaseNotify();
+    await Promise.all([pending, stopping]);
+    expect(stopped).toBe(true);
+    expect(listenStopped).toBe(true);
+    expect(sent).toHaveLength(1); // the in-flight publish completed, not discarded
+  });
 });
