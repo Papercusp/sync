@@ -46,6 +46,14 @@ export function createUsePollingQuery(config: PollingConfig) {
     }, [queryName, argsKey]);
 
     const { data, isLoading, isFetching, isPlaceholderData, error, refetch } = useQuery({
+      // The raw args object is safe here: TanStack v5 hashes query keys
+      // structurally (sorted keys), so content-equal args from non-memoized
+      // callers map to the same query — no refetch churn (pinned by
+      // usePollingQuery.test.tsx, audit P-066). Keep it an OBJECT: the
+      // SSEAdapter's exact-match setQueryData/invalidateQueries build keys
+      // from server-emitted args objects, which match structurally; a
+      // JSON.stringify'd string key would be key-order-sensitive and break
+      // that cross-source matching.
       queryKey: ['sync', queryName, args],
       queryFn,
       refetchInterval: interval,

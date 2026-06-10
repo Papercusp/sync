@@ -91,6 +91,19 @@ const DEFAULT_HISTORY_WINDOW_MS = 60_000;
 const DEFAULT_DEDUPE_WINDOW_MS = 90_000;
 const DEFAULT_PAYLOAD_SIZE_LIMIT = 32 * 1024;
 
+/** Tiny non-crypto hash (FNV-1a, 32-bit) for the dedupe key's data leg.
+ *  The key needs *equality* on the payload, not the payload bytes: storing
+ *  full serialized payloads as Map keys retained them in memory for the
+ *  whole dedupe window and made every key comparison O(payload size). */
+function fnv1a(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
 export function createInvalidationBus(
   opts: CreateInvalidationBusOptions,
 ): InvalidationBus {
@@ -106,6 +119,7 @@ export function createInvalidationBus(
   const history: SyncEvent[] = [];
   const subscribers = new Set<{ send: (e: SyncEvent) => void }>();
   const recentNotifies = new Map<string, number>();
+  const inflightNotifies = new Set<Promise<unknown>>();
 
   let startPromise: Promise<void> | null = null;
 
@@ -202,8 +216,9 @@ export function createInvalidationBus(
     }
 
     // Source-side dedupe. Data-bearing notifies hash the data into the key
-    // so a NEW row set still gets through; pure invalidates collapse.
-    const dataKey = data === undefined ? '' : JSON.stringify(data);
+    // so a NEW row set still gets through; pure invalidates collapse. Only
+    // a short hash goes into the key — never the payload itself.
+    const dataKey = data === undefined ? '' : fnv1a(JSON.stringify(data));
     const key = `${name}|${args ? JSON.stringify(args) : ''}|${dataKey}`;
     const ts = now();
     const last = recentNotifies.get(key);
@@ -211,15 +226,33 @@ export function createInvalidationBus(
     recentNotifies.set(key, ts);
     pruneNotifyCache(ts);
 
+    const publish = Promise.resolve(opts.notify.notify(JSON.stringify(payload)));
+    inflightNotifies.add(publish);
     try {
-      await opts.notify.notify(JSON.stringify(payload));
+      await publish;
     } catch (e) {
       onError('notify', e);
+    } finally {
+      inflightNotifies.delete(publish);
     }
   }
 
+  /**
+   * Stop the bus:
+   *   1. Drops all subscribers immediately — no further fan-out.
+   *   2. DRAINS in-flight `notifyInvalidate` sink publishes (a stop during
+   *      a write burst doesn't silently discard outbound notifies; their
+   *      failures still route to `onError`, never to the stop caller).
+   *   3. Stops the ListenSource and resets the lazy-start latch.
+   * A `notifyInvalidate` made AFTER stop() still attempts to publish
+   * (best-effort against a stopped sink); a later subscribe()/start()
+   * restarts the listen source.
+   */
   async function stop(): Promise<void> {
     subscribers.clear();
+    if (inflightNotifies.size > 0) {
+      await Promise.allSettled([...inflightNotifies]);
+    }
     if (opts.listen.stop) await opts.listen.stop();
     startPromise = null;
   }

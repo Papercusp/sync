@@ -219,7 +219,7 @@ export function SyncProvider({
     return () => {
       cancelled = true;
     };
-  }, [syncType, server, onTransportError]);
+  }, [syncType, activeTransport, server, onTransportError]);
 
   // schema/queries are only used by the WebSocket transport; PollingAdapter
   // ignores them safely. Threading both through commonProps keeps the call
