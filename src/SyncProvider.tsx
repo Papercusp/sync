@@ -154,6 +154,8 @@ export function SyncProvider({
   restEndpoint,
   pollIntervalMs = 10_000,
   fallbackDelayMs = 10_000,
+  recoveryDelayMs,
+  recoveryMaxDelayMs,
   schema,
   queries,
   tokenQueryParam,
@@ -164,6 +166,8 @@ export function SyncProvider({
   const { activeTransport, onTransportError } = useTransportFallback({
     preferred: syncType,
     fallbackDelayMs,
+    recoveryDelayMs,
+    recoveryMaxDelayMs,
   });
 
   // null = probe in progress; true/false = decision made.
@@ -185,6 +189,10 @@ export function SyncProvider({
 
   useEffect(() => {
     if (syncType !== 'WEBSOCKETS') return;
+    // Gate on activeTransport so a transport recovery (useTransportFallback
+    // retrying the preferred transport after a fallback) re-runs the probe:
+    // wsHealthy only flips back to true through a fresh successful probe.
+    if (activeTransport !== 'WEBSOCKETS') return;
     if (typeof window === 'undefined') return;
     let cancelled = false;
 

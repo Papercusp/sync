@@ -14,6 +14,14 @@ export interface SyncProviderProps {
   /** Seconds of WS disconnection before fallback. Default: 10_000 (10s). */
   fallbackDelayMs?: number;
   /**
+   * After falling back, wait this long before retrying the preferred
+   * transport (doubles per failed retry, capped at recoveryMaxDelayMs;
+   * resets once a retry sticks). 0 disables recovery. Default: 30_000.
+   */
+  recoveryDelayMs?: number;
+  /** Cap for the doubling recovery delay. Default: 300_000 (5 min). */
+  recoveryMaxDelayMs?: number;
+  /**
    * Zero schema for the WebSocket transport. Required when syncType is
    * 'WEBSOCKETS'. Polling-only consumers can omit it.
    *
