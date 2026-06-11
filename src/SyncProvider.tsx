@@ -153,6 +153,7 @@ export function SyncProvider({
   server,
   restEndpoint,
   pollIntervalMs = 10_000,
+  ssePollIntervalMs,
   fallbackDelayMs = 10_000,
   recoveryDelayMs,
   recoveryMaxDelayMs,
@@ -264,12 +265,18 @@ export function SyncProvider({
   // wraps the polling fetcher (initial load + post-invalidate refetch) and
   // adds an EventSource subscriber that pushes invalidate/update events.
   // Falls back to polling on repeated SSE failures via useTransportFallback.
+  //
+  // The interval handed to the SSE adapter is `ssePollIntervalMs` (the LONG
+  // drift-repair tick, adapter default 180s), NOT `pollIntervalMs` — under
+  // SSE the tick is gap insurance, not the freshness source (EI-278). The
+  // POLLING fallback below keeps the fast `pollIntervalMs`, where the tick
+  // IS the freshness source.
   if (syncType === 'SSE' && activeTransport === 'SSE') {
     return (
       <Suspense fallback={
         <PendingSyncAdapter transport="SSE">{children}</PendingSyncAdapter>
       }>
-        <LazySSEAdapter key="sse" {...commonProps}>
+        <LazySSEAdapter key="sse" {...commonProps} pollIntervalMs={ssePollIntervalMs}>
           {children}
         </LazySSEAdapter>
       </Suspense>

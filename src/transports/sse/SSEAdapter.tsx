@@ -77,6 +77,14 @@ interface SSEAdapterProps {
   userId?: string;
   server?: string;
   restEndpoint?: string;
+  /**
+   * Drift-repair refetch interval. Under SSE, freshness comes from
+   * invalidate-driven refetches — this tick only repairs pushes lost to an
+   * SSE blip or a table missing its bridge entry, so it defaults LONG
+   * (180s). Do not hand it the POLLING transport's fast cadence (EI-278:
+   * a shared 5-10s interval made every subscription REST-refetch on that
+   * cadence on top of SSE — ~3.2 fetches/s sustained, 16GB webview OOM).
+   */
   pollIntervalMs?: number;
   onTransportError?: (error: Error) => void;
   schema?: unknown;
@@ -229,11 +237,20 @@ function SSESubscriber({
   return null;
 }
 
+/**
+ * Default SSE drift-repair interval (EI-278). LONG by design: under SSE the
+ * refetch trigger is the invalidation push; this tick only catches pushes
+ * lost to a blip or an unbridged table. Anything in the 5-15s range here
+ * turns the "push-driven" transport into a fleet-wide poll storm
+ * (~3.2 req/s measured on the operator /adv page) — see the pin test.
+ */
+export const SSE_DRIFT_REPAIR_DEFAULT_MS = 180_000;
+
 export function SSEAdapter({
   children,
   restEndpoint,
   server,
-  pollIntervalMs = 10_000,
+  pollIntervalMs = SSE_DRIFT_REPAIR_DEFAULT_MS,
   onTransportError,
   tokenQueryParam,
   endpointOverride,

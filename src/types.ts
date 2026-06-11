@@ -9,8 +9,23 @@ export interface SyncProviderProps {
   server?: string;
   /** REST endpoint base URL for polling. Default: server value or '/zero'. */
   restEndpoint?: string;
-  /** Polling interval in ms. Default: 10_000 (10s). */
+  /**
+   * Polling interval in ms for the POLLING transport (and the WS adapter's
+   * internal fallback), where the tick IS the freshness source.
+   * Default: 10_000 (10s).
+   */
   pollIntervalMs?: number;
+  /**
+   * Drift-repair interval in ms for the SSE transport. Under SSE, freshness
+   * comes from invalidate-driven refetches; this tick only repairs pushes
+   * lost to an SSE blip or a table missing its invalidation bridge entry —
+   * it is NOT a freshness source, so it should be LONG. (EI-278: when this
+   * shared the 5-10s pollIntervalMs, every subscribed query REST-refetched
+   * on that cadence on top of SSE — ~3.2 fetches/s sustained on the
+   * operator's /adv page, the dominant workload behind a 16GB webview OOM.)
+   * Default: 180_000 (3min).
+   */
+  ssePollIntervalMs?: number;
   /** Seconds of WS disconnection before fallback. Default: 10_000 (10s). */
   fallbackDelayMs?: number;
   /**
