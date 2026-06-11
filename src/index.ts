@@ -1,5 +1,14 @@
 export { SyncProvider } from './SyncProvider';
 export { onSyncBusEvent, emitSyncBusEvent, type SyncBusEvent } from './bus-tap';
+export {
+  useSyncConnectivity,
+  getSyncConnectivity,
+  onSyncConnectivity,
+  reportSyncReachable,
+  reportSyncUnreachable,
+  _resetSyncConnectivityForTests,
+  type SyncConnectivity,
+} from './connectivity';
 export { lazyWithRetry, shouldAutoReloadChunkFailure } from './lazy-with-retry';
 export { useSyncQuery, useSyncMutate, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';

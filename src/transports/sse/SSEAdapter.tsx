@@ -70,6 +70,7 @@ import {
 } from '../polling/usePollingQuery';
 import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
 import { emitSyncBusEvent, type SyncBusEvent } from '../../bus-tap';
+import { reportSyncReachable, reportSyncUnreachable } from '../../connectivity';
 import type { SyncType } from '../../types';
 
 interface SSEAdapterProps {
@@ -215,10 +216,16 @@ function SSESubscriber({
       },
       onOpen: () => {
         syncMetrics.sseConnected();
+        // The stream opened — the origin is reachable (EI-239 offline store).
+        reportSyncReachable();
       },
       onStatusChange: (s) => {
         if (s === 'connecting' && !firstConnect) syncMetrics.sseReconnectAttempt();
         if (s === 'failing' || s === 'closed') syncMetrics.sseDisconnected();
+        // Reconnects failing = network-level unreachability candidate. A
+        // single blip that reopens resets via onOpen before the offline
+        // threshold (2 consecutive) is met.
+        if (s === 'failing') reportSyncUnreachable();
         // 'idle' after firstConnect=false means we transitioned from a live
         // connection (visibility-pause); the metric needs to fire so dashboards
         // see the drop. Initial 'idle' (before any connect) is skipped.
