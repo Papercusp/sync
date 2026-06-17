@@ -60,6 +60,15 @@ describe('createRestQueryHandler', () => {
     expect(json.rows).toHaveLength(1);
   });
 
+  it('does not gzip a small body even when accept-encoding allows', async () => {
+    const res = await handler(
+      new Request('http://t/rest-query?name=q', { headers: { 'accept-encoding': 'gzip' } }),
+    );
+    expect(res.headers.get('content-encoding')).toBeNull();
+    const body = (await res.json()) as { rows: unknown[] };
+    expect(body.rows).toHaveLength(1);
+  });
+
   it('499 on an already-aborted request', async () => {
     const res = await handler(new Request('http://t/rest-query?name=q', { signal: AbortSignal.abort() }));
     expect(res.status).toBe(499);
@@ -99,6 +108,20 @@ describe('createRestBatchHandler', () => {
     expect(body.results[0].rows).toEqual([{ name: 'q', args: { i: 1 } }]);
     expect(body.results[1].error).toMatch(/unknown queryName/);
     expect(body.results[2].error).toMatch(/kaboom/);
+  });
+
+  it('async-gzips a large batch body and it round-trips', async () => {
+    const res = await handler(
+      new Request('http://t/batch', {
+        method: 'POST',
+        headers: { 'accept-encoding': 'gzip' },
+        body: JSON.stringify({ queries: [{ name: 'big' }] }),
+      }),
+    );
+    expect(res.headers.get('content-encoding')).toBe('gzip');
+    const buf = Buffer.from(await res.arrayBuffer());
+    const json = JSON.parse(gunzipSync(buf).toString()) as { results: Array<{ rows: unknown[] }> };
+    expect(json.results[0].rows).toHaveLength(1);
   });
 });
 
