@@ -170,7 +170,7 @@ export function createSseHandler(
     return sse.sseResponse({
       signal: req.signal,
       lastEventId,
-      heartbeatMs: 15_000,
+      heartbeatMs: 10_000,
       initialHeartbeat: true,
       replay: () => {
         if (lastEventId == null || lastEventId <= 0) return [];
