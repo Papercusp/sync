@@ -9,10 +9,7 @@ export function getQueryClient(): QueryClient {
         queries: {
           staleTime: 5_000,
           // gcTime: 1 hour. Queries survive subscriber unmount so navigating
-          // away and back in genuine polling mode shows cached data instantly.
-          // WebSocketAdapter calls clearPollingCache() on mount to stop any
-          // probe-window polls the moment WS takes over, so long gcTime does
-          // not cause background REST leakage in WS mode.
+          // away and back in polling/SSE mode shows cached data instantly.
           gcTime: 60 * 60 * 1000,
           refetchOnWindowFocus: false,
           structuralSharing: true, // preserves unchanged refs across refetches
@@ -33,9 +30,8 @@ export function getQueryClient(): QueryClient {
 
 /**
  * Immediately cancels all in-flight queries and removes them from cache.
- * Called by WebSocketAdapter on mount so that probe-window polling stops
- * the moment WS takes over, without sacrificing normal gcTime for the
- * genuine-polling-fallback path.
+ * (Was called by the now-removed WebSocket transport on mount to drop
+ * probe-window polls; currently unused, retained as a cache-reset utility.)
  */
 export function clearPollingCache(): void {
   if (!queryClient) return;
