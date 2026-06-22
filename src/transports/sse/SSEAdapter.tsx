@@ -4,7 +4,7 @@
  * SSE Transport — desktop's PRIMARY push transport.
  *
  * Status (2026-05-11): production. The shipping desktop app (Tauri) mounts
- * this adapter via `syncType="SSE"` in HarnessZeroProvider whenever
+ * this adapter via `syncType="SSE"` in HarnessSyncProvider whenever
  * runtime === 'tauri' (detected via `__TAURI_INTERNALS__` +
  * `/api/desktop/version` fingerprint). The server endpoint
  * `apps/operator/app/api/zero-harness/sse/route.ts` emits invalidate /
