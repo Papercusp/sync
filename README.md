@@ -22,4 +22,4 @@ it transports whatever query shape you give it.
 
 Submodule under `github.com/Papercusp/`. The SSE-vs-WS selection and the
 desktop-primary decision live in the consuming app's provider (for the
-operator: `apps/operator/providers/HarnessZeroProvider.tsx`).
+operator: `apps/operator/providers/HarnessSyncProvider.tsx`).

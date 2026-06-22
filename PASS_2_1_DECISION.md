@@ -9,7 +9,7 @@
 >   `apps/operator/app/api/zero-harness/sse/route.ts` → `SSEAdapter`.
 > - Zero WS remains primary on the browser test path; SSE acts as fallback there.
 >
-> Source of truth: `apps/operator/providers/HarnessZeroProvider.tsx:6-19`. Also
+> Source of truth: `apps/operator/providers/HarnessSyncProvider.tsx`. Also
 > see `/CLAUDE.md` § "Deployment model".
 >
 > The investigation and reasoning below were correct given the information at
