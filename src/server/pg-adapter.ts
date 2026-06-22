@@ -50,17 +50,32 @@ const DEFAULT_CHANNEL = 'sync_invalidate';
  * A `ListenSource` backed by a dedicated postgres `LISTEN` connection.
  * `open()` is called once on `start()` to create the (long-lived,
  * single-connection) client — the host decides the pool policy.
+ *
+ * `onListen` is invoked every time the LISTEN is (re)established — on the
+ * initial subscribe AND after the dedicated connection drops and postgres-js
+ * transparently reconnects + re-issues the `LISTEN` (its `onclose` → re-`listen`
+ * path re-invokes the listener's `onlisten`). This is the COLD-BUST hook: a
+ * fire-and-forget NOTIFY that fired while the connection was down is never
+ * replayed to this LISTEN, so any host-side cache fed by the stream could hold
+ * stale entries across the gap; `onListen` lets the host clear that cache on
+ * every (re)connect. (It fires on the first connect too — clearing a still-empty
+ * cache is a harmless no-op.)
  */
 export function createPgListenSource(opts: {
   open: () => PgSqlLike;
   channel?: string;
+  onListen?: () => void;
 }): ListenSource {
   const channel = opts.channel ?? DEFAULT_CHANNEL;
   let sql: PgSqlLike | null = null;
   return {
     async start(onMessage) {
       sql = opts.open();
-      await sql.listen(channel, (raw) => onMessage(raw));
+      await sql.listen(
+        channel,
+        (raw) => onMessage(raw),
+        opts.onListen ? () => opts.onListen?.() : undefined,
+      );
     },
     async stop() {
       if (sql?.end) await sql.end({ timeout: 5 });

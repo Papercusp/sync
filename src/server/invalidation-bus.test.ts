@@ -122,6 +122,55 @@ describe('invalidation-bus', () => {
     ]);
   });
 
+  it('passes the raw event args to the bridge and SCOPES a { name, args } target', async () => {
+    // caching-layer-tag-eca P-006: a per-row query opts into scoping; the
+    // bridged event carries the changed row's key so the client invalidates
+    // just that key (exact-match), not the whole query cache.
+    const lb = makeLoopback();
+    const seenArgs: unknown[] = [];
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      bridge: (name, args) => {
+        seenArgs.push(args);
+        if (name !== 'harness_shared.widget.changed') return [];
+        const id = (args as { id?: unknown } | undefined)?.id;
+        return typeof id === 'string'
+          ? [{ name: 'widget.byId', args: { id } }] // scoped
+          : ['widget.byId']; // full-bust fallback
+      },
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    lb.deliver(
+      JSON.stringify({
+        name: 'harness_shared.widget.changed',
+        args: { workspace_id: 'w1', op: 'UPDATE', id: 'widget-42' },
+      }),
+    );
+    // The bridge saw the trigger args (with the row id).
+    expect(seenArgs).toEqual([{ workspace_id: 'w1', op: 'UPDATE', id: 'widget-42' }]);
+    // Original event + one SCOPED bridged event carrying just { id }.
+    const bridged = events.find((e) => e.name === 'widget.byId');
+    expect(bridged?.args).toEqual({ id: 'widget-42' });
+  });
+
+  it('a bare-string bridge target full-busts (no args), even with id-bearing event args', async () => {
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      bridge: () => ['list.byHarness'], // unconditional full-bust
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+    lb.deliver(JSON.stringify({ name: 'harness_shared.t.changed', args: { id: 'x', workspace_id: 'w' } }));
+    const bridged = events.find((e) => e.name === 'list.byHarness');
+    expect(bridged).toBeDefined();
+    expect(bridged?.args).toBeUndefined();
+  });
+
   it('ignores malformed / nameless raw events', async () => {
     const lb = makeLoopback();
     const bus = createInvalidationBus({ listen: lb.listen, notify: lb.notify });

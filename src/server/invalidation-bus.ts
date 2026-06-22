@@ -42,6 +42,20 @@ export interface ListenSource {
   stop?(): void | Promise<void>;
 }
 
+/**
+ * A bridged target the `bridge` may synthesize from a raw event. Either:
+ *   - a bare query NAME (string) → full-bust (the bridged event carries NO
+ *     `args`, so the client invalidates EVERY cache entry under that name); or
+ *   - `{ name, args }` → SCOPED invalidate (the bridged event carries those
+ *     `args`, so the client invalidates only the matching cache key — e.g.
+ *     a single row's entry, built from the source event's row PK).
+ *
+ * A string and `{ name }` (no args) are equivalent — both full-bust.
+ */
+export type BridgeTarget =
+  | string
+  | { name: string; args?: Record<string, unknown> };
+
 /** Outbound transport: publish a JSON payload to all processes. */
 export interface NotifySink {
   notify(payloadJson: string): Promise<void>;
@@ -61,8 +75,18 @@ export interface CreateInvalidationBusOptions {
   dedupeWindowMs?: number;
   /** Serialized-payload byte cap; over → drop `data`. Default 32768. */
   payloadSizeLimit?: number;
-  /** Synthesize extra query names from a raw event name (e.g. PG trigger). */
-  bridge?: (eventName: string) => readonly string[];
+  /**
+   * Synthesize extra invalidation targets from a raw event (e.g. a PG-trigger
+   * `<schema>.<table>.changed`). Receives BOTH the event name and its `args`
+   * (the trigger payload — `{ workspace_id, op, id }` for the operator) so a
+   * target can be SCOPED to the changed row's PK (`args.id`). Returns
+   * {@link BridgeTarget}s: a bare string full-busts (back-compat); a
+   * `{ name, args }` object scopes the invalidation to those args.
+   */
+  bridge?: (
+    eventName: string,
+    eventArgs?: Record<string, unknown>,
+  ) => readonly BridgeTarget[];
   /** Injectable clock (testing). Default Date.now. */
   now?: () => number;
   onError?: (where: string, err: unknown) => void;
@@ -160,9 +184,18 @@ export function createInvalidationBus(
     };
     fanout(ev);
 
-    // Bridge: synthesize additional events (no args → full-name invalidate).
-    for (const bridgedName of bridge(parsed.name)) {
-      fanout({ id: nextId++, ts: now(), name: bridgedName });
+    // Bridge: synthesize additional events from the raw (name, args). A bare
+    // string target full-busts (no `args` → client invalidates every cache
+    // entry under that name); a `{ name, args }` target SCOPES the invalidate
+    // to those args (e.g. just the changed row's key, derived from args.id).
+    for (const target of bridge(parsed.name, ev.args)) {
+      if (typeof target === 'string') {
+        fanout({ id: nextId++, ts: now(), name: target });
+      } else {
+        const bridged: SyncEvent = { id: nextId++, ts: now(), name: target.name };
+        if (target.args !== undefined) bridged.args = target.args;
+        fanout(bridged);
+      }
     }
   }
 

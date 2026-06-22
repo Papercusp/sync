@@ -32,6 +32,7 @@ export {
   type SubscribeHandle,
   type CreateInvalidationBusOptions,
   type InvalidationBus,
+  type BridgeTarget,
 } from './invalidation-bus';
 
 export {
