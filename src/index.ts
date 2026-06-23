@@ -15,6 +15,11 @@ export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';
 export type { SyncMetricsSnapshot } from './observability/metrics';
+
+// Rows-delta CLIENT seam (agent-tool-delta-client-rollout-2026-06-23 P-006) — the host
+// (operator) injects a codec backed by the tooldef DeltaToolClient; no codec = full, as today.
+export { setSyncDeltaCodec, getSyncDeltaCodec } from './delta-codec';
+export type { SyncDeltaCodec, SyncDeltaMeta, SyncDeltaSlot } from './delta-codec';
 export type {
   SyncType,
   SyncProviderProps,
