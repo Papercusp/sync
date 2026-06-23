@@ -64,6 +64,30 @@ describe('invalidation-bus', () => {
     expect(lb.delivered).toHaveLength(2);
   });
 
+  it('per-call dedupeWindowMs override lets a self-debounced producer through the default window', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000, // the real default — would suppress a 10s-cadence reconcile
+    });
+    await bus.subscribe(() => {});
+
+    // A self-debounced detector firing every ~10s with a SHORT per-call window.
+    await bus.notifyInvalidate('harness_shared.user_actions.changed', undefined, undefined, { dedupeWindowMs: 5_000 });
+    expect(lb.delivered).toHaveLength(1);
+
+    clock.t += 4_000; // < override window → still suppressed (collapses a same-tick burst)
+    await bus.notifyInvalidate('harness_shared.user_actions.changed', undefined, undefined, { dedupeWindowMs: 5_000 });
+    expect(lb.delivered).toHaveLength(1);
+
+    clock.t += 2_000; // now 6s since the first — past the 5s override (but FAR inside the 90s default)
+    await bus.notifyInvalidate('harness_shared.user_actions.changed', undefined, undefined, { dedupeWindowMs: 5_000 });
+    expect(lb.delivered).toHaveLength(2); // override won — the 90s default would have suppressed this
+  });
+
   it('different args are not deduped against each other', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
