@@ -33,6 +33,7 @@ export {
   type CreateInvalidationBusOptions,
   type InvalidationBus,
   type BridgeTarget,
+  type NotifyInvalidateOpts,
 } from './invalidation-bus';
 
 export {

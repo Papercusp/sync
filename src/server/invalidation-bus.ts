@@ -61,6 +61,18 @@ export interface NotifySink {
   notify(payloadJson: string): Promise<void>;
 }
 
+/** Per-call options for {@link InvalidationBus.notifyInvalidate}. */
+export interface NotifyInvalidateOpts {
+  /**
+   * Override the bus's source-side dedupe window (default {@link CreateInvalidationBusOptions.dedupeWindowMs}
+   * = 90s) FOR THIS CALL. Use a SHORT window for a producer that is ALREADY self-debounced
+   * (a periodic change-detector polling on a fixed cadence) so its legitimate per-tick fires
+   * aren't collapsed into the 90s window meant for chatty per-row triggers. Never RAISE it to
+   * fake a faster-than-window cadence without self-debouncing — that reintroduces the storm.
+   */
+  dedupeWindowMs?: number;
+}
+
 export interface SubscribeHandle {
   send: (e: SyncEvent) => void;
   close: () => void;
@@ -103,6 +115,7 @@ export interface InvalidationBus {
     name: string,
     args?: Record<string, unknown>,
     data?: unknown[],
+    notifyOpts?: NotifyInvalidateOpts,
   ): Promise<void>;
   /** Eagerly start the ListenSource (otherwise lazy on first subscribe). */
   start(): Promise<void>;
@@ -237,6 +250,7 @@ export function createInvalidationBus(
     name: string,
     args?: Record<string, unknown>,
     data?: unknown[],
+    notifyOpts?: NotifyInvalidateOpts,
   ): Promise<void> {
     let payload: Record<string, unknown> = { name };
     if (args !== undefined) payload.args = args;
@@ -254,8 +268,15 @@ export function createInvalidationBus(
     const dataKey = data === undefined ? '' : fnv1a(JSON.stringify(data));
     const key = `${name}|${args ? JSON.stringify(args) : ''}|${dataKey}`;
     const ts = now();
+    // Per-call dedupe override. A SELF-DEBOUNCED producer — e.g. the append-heavy
+    // change-detector that polls max(id) every ~8s — is already rate-limited by its own
+    // cadence, so the bus's 90s default (built to collapse a chatty per-row reconcile)
+    // would WRONGLY collapse its legitimate per-tick fires to one per 90s. It passes a
+    // short window so each detected change gets through, while the window still collapses
+    // a same-tick cross-process burst. (Clamped ≥0; falls back to the bus default.)
+    const effDedupeMs = Math.max(0, notifyOpts?.dedupeWindowMs ?? dedupeWindowMs);
     const last = recentNotifies.get(key);
-    if (last !== undefined && ts - last < dedupeWindowMs) return;
+    if (last !== undefined && ts - last < effDedupeMs) return;
     recentNotifies.set(key, ts);
     pruneNotifyCache(ts);
 
