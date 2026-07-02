@@ -201,14 +201,27 @@ export function createInvalidationBus(
     // string target full-busts (no `args` → client invalidates every cache
     // entry under that name); a `{ name, args }` target SCOPES the invalidate
     // to those args (e.g. just the changed row's key, derived from args.id).
+    //
+    // These targets fire once PER ROW WRITE to the source table (a PG trigger,
+    // not app code), so a hot table bridged to several query names (e.g.
+    // harness_plans -> plans.list/get/items/attention/search/byHive/schedule/
+    // scheduledOccurrences) fans out that many full-bust broadcasts on EVERY
+    // write — with no throttling of its own. Route each synthesized target
+    // through the SAME source-side dedupe explicit notifyInvalidate() calls
+    // get: this is exactly the "chatty per-row reconcile" case the bus's
+    // dedupeWindowMs doc-comment describes, and until this was added it was
+    // the one fanout path that bypassed it entirely (WI-840 — a bridged table
+    // under sustained multi-agent write load produced an unthrottled
+    // invalidate storm: thousands of full re-fetches/hour from every live
+    // subscriber, scaling with fleet write-rate rather than viewer count).
     for (const target of bridge(parsed.name, ev.args)) {
-      if (typeof target === 'string') {
-        fanout({ id: nextId++, ts: now(), name: target });
-      } else {
-        const bridged: SyncEvent = { id: nextId++, ts: now(), name: target.name };
-        if (target.args !== undefined) bridged.args = target.args;
-        fanout(bridged);
-      }
+      const name = typeof target === 'string' ? target : target.name;
+      const targetArgs = typeof target === 'string' ? undefined : target.args;
+      const key = `${name}|${targetArgs ? JSON.stringify(targetArgs) : ''}|`;
+      if (!shouldFanout(key, ev.ts, dedupeWindowMs)) continue;
+      const bridged: SyncEvent = { id: nextId++, ts: ev.ts, name };
+      if (targetArgs !== undefined) bridged.args = targetArgs;
+      fanout(bridged);
     }
   }
 
@@ -246,6 +259,23 @@ export function createInvalidationBus(
     }
   }
 
+  /**
+   * Source-side dedupe check shared by both fanout producers:
+   *   - `notifyInvalidate()` (explicit app-code invalidate/update calls), and
+   *   - `onMessage()`'s `bridge()` loop (PG-trigger-synthesized targets).
+   * Returns true (and records `ts` against `key`) the first time a given
+   * key fires within `windowMs`; false for a repeat within the window (the
+   * caller should skip that fanout). Centralizing this means a fanout
+   * producer can't accidentally skip dedupe by fanning out directly.
+   */
+  function shouldFanout(key: string, ts: number, windowMs: number): boolean {
+    const last = recentNotifies.get(key);
+    if (last !== undefined && ts - last < windowMs) return false;
+    recentNotifies.set(key, ts);
+    pruneNotifyCache(ts);
+    return true;
+  }
+
   async function notifyInvalidate(
     name: string,
     args?: Record<string, unknown>,
@@ -275,10 +305,7 @@ export function createInvalidationBus(
     // short window so each detected change gets through, while the window still collapses
     // a same-tick cross-process burst. (Clamped ≥0; falls back to the bus default.)
     const effDedupeMs = Math.max(0, notifyOpts?.dedupeWindowMs ?? dedupeWindowMs);
-    const last = recentNotifies.get(key);
-    if (last !== undefined && ts - last < effDedupeMs) return;
-    recentNotifies.set(key, ts);
-    pruneNotifyCache(ts);
+    if (!shouldFanout(key, ts, effDedupeMs)) return;
 
     const publish = Promise.resolve(opts.notify.notify(JSON.stringify(payload)));
     inflightNotifies.add(publish);
