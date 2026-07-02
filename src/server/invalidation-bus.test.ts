@@ -250,6 +250,88 @@ describe('invalidation-bus', () => {
     expect(lb.delivered).toHaveLength(3);
   });
 
+  // ── WI-840: bridge()-synthesized targets go through the SAME source-side
+  // dedupe as explicit notifyInvalidate() calls, instead of fanning out
+  // unthrottled on every single row-level trigger event. ─────────────────
+
+  it('bridged full-bust targets dedupe within the window, like an explicit notifyInvalidate', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 1000,
+      // Mirrors a hot table (e.g. harness_plans) bridged to a full-bust list query.
+      bridge: (name) => (name === 'harness_shared.harness_plans.changed' ? ['plans.list'] : []),
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    lb.deliver(JSON.stringify({ name: 'harness_shared.harness_plans.changed', args: { id: 'p1' } }));
+    lb.deliver(JSON.stringify({ name: 'harness_shared.harness_plans.changed', args: { id: 'p2' } })); // different row, same bridge target
+    lb.deliver(JSON.stringify({ name: 'harness_shared.harness_plans.changed', args: { id: 'p3' } }));
+    // Every raw row-changed event still delivers (unthrottled)...
+    expect(events.filter((e) => e.name === 'harness_shared.harness_plans.changed')).toHaveLength(3);
+    // ...but the bridged full-bust target only fanned out ONCE inside the window.
+    expect(events.filter((e) => e.name === 'plans.list')).toHaveLength(1);
+
+    clock.t += 1001; // past the window
+    lb.deliver(JSON.stringify({ name: 'harness_shared.harness_plans.changed', args: { id: 'p4' } }));
+    expect(events.filter((e) => e.name === 'plans.list')).toHaveLength(2);
+  });
+
+  it('a hot table bridged to several query names throttles each target independently, not cross-suppressed', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 1000,
+      bridge: (name) =>
+        name === 'harness_shared.harness_plans.changed'
+          ? ['plans.list', 'plans.attention', 'plans.items']
+          : [],
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    lb.deliver(JSON.stringify({ name: 'harness_shared.harness_plans.changed' }));
+    lb.deliver(JSON.stringify({ name: 'harness_shared.harness_plans.changed' }));
+    // All three distinct bridged names get through once each — the dedupe key
+    // includes the target name, so one target's throttling never suppresses
+    // a sibling target derived from the same raw event.
+    expect(events.filter((e) => e.name === 'plans.list')).toHaveLength(1);
+    expect(events.filter((e) => e.name === 'plans.attention')).toHaveLength(1);
+    expect(events.filter((e) => e.name === 'plans.items')).toHaveLength(1);
+  });
+
+  it('bridged SCOPED targets with different args are not cross-suppressed', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 1000,
+      bridge: (name, args) => {
+        const id = (args as { id?: unknown } | undefined)?.id;
+        return typeof id === 'string' && name === 'harness_shared.widget.changed'
+          ? [{ name: 'widget.byId', args: { id } }]
+          : [];
+      },
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    lb.deliver(JSON.stringify({ name: 'harness_shared.widget.changed', args: { id: 'a' } }));
+    lb.deliver(JSON.stringify({ name: 'harness_shared.widget.changed', args: { id: 'b' } }));
+    lb.deliver(JSON.stringify({ name: 'harness_shared.widget.changed', args: { id: 'a' } })); // repeat of 'a' — suppressed
+    const scoped = events.filter((e) => e.name === 'widget.byId');
+    expect(scoped.map((e) => e.args)).toEqual([{ id: 'a' }, { id: 'b' }]);
+  });
+
   it('stop() drains in-flight notifies before stopping the listen source', async () => {
     let releaseNotify!: () => void;
     const gate = new Promise<void>((r) => (releaseNotify = r));
