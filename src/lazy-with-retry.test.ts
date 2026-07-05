@@ -8,7 +8,51 @@
  * Run with: npx vitest run libs/generic/sync/src/lazy-with-retry.test.ts
  */
 import { describe, expect, it } from 'vitest';
-import { shouldAutoReloadChunkFailure } from './lazy-with-retry';
+import {
+  CHUNK_LOAD_ERROR_RE,
+  isChunkLoadError,
+  shouldAutoReloadChunkFailure,
+} from './lazy-with-retry';
+
+describe('isChunkLoadError (retry gate — must match EVERY engine, esp. WebKit)', () => {
+  it('matches the WebKit/WebKitGTK phrasing the packaged Tauri desktop actually throws', () => {
+    // WI-2902 regression: the OLD retry regex matched only the webpack phrasings,
+    // so this exact message — the one the packaged desktop throws — slipped
+    // through un-retried and escalated to the fatal route error boundary.
+    expect(isChunkLoadError(new Error('Importing a module script failed.'))).toBe(true);
+    expect(CHUNK_LOAD_ERROR_RE.test('Importing a module script failed.')).toBe(true);
+  });
+
+  it('matches every browser engine + webpack phrasing of a chunk/dynamic-import failure', () => {
+    for (const msg of [
+      'Importing a module script failed.', // WebKit (Tauri webview)
+      'Failed to fetch dynamically imported module: http://x/chunk-abc.js', // Chromium
+      'error loading dynamically imported module', // Firefox
+      'Loading chunk 42 failed.', // webpack
+      'Failed to load chunk vendors', // webpack
+      'Failed to fetch chunk main', // webpack
+    ]) {
+      expect(isChunkLoadError(new Error(msg))).toBe(true);
+    }
+  });
+
+  it('matches a ChunkLoadError by name even when the message does not', () => {
+    const e = new Error('anything at all');
+    e.name = 'ChunkLoadError';
+    expect(isChunkLoadError(e)).toBe(true);
+  });
+
+  it('does NOT match an ordinary render/logic bug (never retried, never reloaded)', () => {
+    expect(isChunkLoadError(new TypeError("Cannot read properties of undefined (reading 'map')"))).toBe(false);
+    expect(isChunkLoadError(new Error('Something went wrong'))).toBe(false);
+  });
+
+  it('tolerates non-Error throwables', () => {
+    expect(isChunkLoadError('Importing a module script failed.')).toBe(true);
+    expect(isChunkLoadError(null)).toBe(false);
+    expect(isChunkLoadError(undefined)).toBe(false);
+  });
+});
 
 describe('shouldAutoReloadChunkFailure', () => {
   it('never reloads when reloadOnFail is false', () => {

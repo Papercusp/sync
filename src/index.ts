@@ -9,7 +9,12 @@ export {
   _resetSyncConnectivityForTests,
   type SyncConnectivity,
 } from './connectivity';
-export { lazyWithRetry, shouldAutoReloadChunkFailure } from './lazy-with-retry';
+export {
+  lazyWithRetry,
+  shouldAutoReloadChunkFailure,
+  isChunkLoadError,
+  CHUNK_LOAD_ERROR_RE,
+} from './lazy-with-retry';
 export { useSyncQuery, useSyncMutate, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
