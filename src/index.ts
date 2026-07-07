@@ -21,6 +21,15 @@ export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useO
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';
 export type { SyncMetricsSnapshot } from './observability/metrics';
 
+// Persisted sync cache (WI-3318): host-app opt-in reload hydration of the sync
+// QueryClient — call enablePersistedSyncCache() at module-eval time.
+export {
+  enablePersistedSyncCache,
+  restorePersistedSyncCache,
+  startSyncCachePersistence,
+} from './persisted-cache';
+export type { PersistedSyncCacheOptions, SyncCacheStorage } from './persisted-cache';
+
 // Rows-delta CLIENT seam (agent-tool-delta-client-rollout-2026-06-23 P-006) — the host
 // (operator) injects a codec backed by the tooldef DeltaToolClient; no codec = full, as today.
 export { setSyncDeltaCodec, getSyncDeltaCodec } from './delta-codec';
