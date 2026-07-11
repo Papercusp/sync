@@ -16,6 +16,7 @@ export {
   CHUNK_LOAD_ERROR_RE,
 } from './lazy-with-retry';
 export { useSyncQuery, useSyncMutate, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
+export { fetchSyncQuery } from './transports/polling/usePollingQuery';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';

@@ -5,6 +5,7 @@ import { useCallback, useRef } from 'react';
 import type { SyncQueryOptions, SyncQueryResult } from '../../types';
 import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
 import { getBatchFetcher } from './batch-fetcher';
+import { getQueryClient } from './queryClient';
 
 interface PollingConfig {
   restEndpoint: string;
@@ -104,4 +105,20 @@ export function createPrefetchSync(config: PollingConfig, queryClient: QueryClie
       staleTime: 30_000,
     });
   };
+}
+
+/** Imperative access to the same named-query cache used by useSyncQuery.
+ * Useful for async store interfaces (dock layouts) that cannot call hooks. */
+export async function fetchSyncQuery<T = unknown>(opts: SyncQueryOptions & {
+  restEndpoint?: string;
+  tokenQueryParam?: string;
+}): Promise<T[]> {
+  const { queryName, args = {}, staleTime = 30_000, restEndpoint = '/api/zero-harness', tokenQueryParam } = opts;
+  const batchFetch = getBatchFetcher(restEndpoint, tokenQueryParam);
+  const result = await getQueryClient().fetchQuery({
+    queryKey: ['sync', queryName, args],
+    queryFn: () => batchFetch(queryName, args),
+    staleTime,
+  });
+  return result.rows as T[];
 }
