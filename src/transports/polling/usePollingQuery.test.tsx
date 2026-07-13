@@ -1,4 +1,6 @@
 /**
+ * @vitest-environment jsdom
+ *
  * Audit P-066 regression: non-memoized args objects must NOT cause refetch
  * storms. TanStack Query v5 hashes query keys structurally (sorted keys), so
  * a content-equal args object minted fresh on every render maps to the same

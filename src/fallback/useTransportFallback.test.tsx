@@ -1,4 +1,6 @@
 /**
+ * @vitest-environment jsdom
+ *
  * Fallback + recovery behavior of useTransportFallback.
  *
  * Audit P-065 (papercusp-full-app-audit-2026-06-09): the hook used to be a
