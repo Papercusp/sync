@@ -1,3 +1,5 @@
+/** @vitest-environment jsdom */
+
 import { describe, it, expect, vi } from 'vitest';
 import { createElement, type ReactNode } from 'react';
 import { renderHook, act, waitFor } from '@testing-library/react';

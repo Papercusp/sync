@@ -1,4 +1,6 @@
 /**
+ * @vitest-environment jsdom
+ *
  * WI-3318 — persisted sync cache round-trip + guard rails. Hermetic: an
  * in-memory Storage stands in for localStorage, explicit QueryClients stand
  * in for the transport singleton (the `client` option), fake timers drive the
