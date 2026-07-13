@@ -1,4 +1,6 @@
 /**
+ * @vitest-environment jsdom
+ *
  * use-history-state.test.ts — the window.history.state React hook.
  * Load-bearing properties: getSnapshot is MEMOIZED by JSON string (returns the
  * same ref when state is structurally unchanged — otherwise useSyncExternalStore
