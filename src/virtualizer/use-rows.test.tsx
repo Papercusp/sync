@@ -1,4 +1,6 @@
 /**
+ * @vitest-environment jsdom
+ *
  * use-rows.test.tsx — unit tests for the virtualizer's `useRows` slicing hook.
  *
  * `useRows` is the shared fetch+slice core behind useSyncVirtualizer. It calls
