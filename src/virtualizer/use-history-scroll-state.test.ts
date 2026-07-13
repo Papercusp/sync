@@ -1,4 +1,6 @@
 /**
+ * @vitest-environment jsdom
+ *
  * use-history-scroll-state.test.ts — persists virtualizer scroll/pagination state
  * in window.history.state under a key, so back/forward restores it. Load-bearing:
  * setScrollState MERGES into the existing history entry (must not clobber sibling
