@@ -17,28 +17,23 @@ import type { SyncType } from '../types';
 const FALLBACK_MS = 1_000;
 const RECOVERY_MS = 5_000;
 
-function setup(opts?: {
-  preferred?: SyncType;
-  fallbackDelayMs?: number;
+type HookProps = {
+  preferred: SyncType;
+  fallbackDelayMs: number;
   recoveryDelayMs?: number;
   recoveryMaxDelayMs?: number;
-}) {
-  return renderHook(
-    (props: {
-      preferred: SyncType;
-      fallbackDelayMs: number;
-      recoveryDelayMs?: number;
-      recoveryMaxDelayMs?: number;
-    }) => useTransportFallback(props),
-    {
-      initialProps: {
-        preferred: opts?.preferred ?? ('SSE' as SyncType),
-        fallbackDelayMs: opts?.fallbackDelayMs ?? FALLBACK_MS,
-        recoveryDelayMs: opts?.recoveryDelayMs ?? RECOVERY_MS,
-        recoveryMaxDelayMs: opts?.recoveryMaxDelayMs,
-      },
-    },
-  );
+};
+
+function setup(opts?: Partial<HookProps>) {
+  // Annotate initialProps so renderHook infers Props = HookProps (optional
+  // keys stay optional); the bare literal made rerender demand every key.
+  const initialProps: HookProps = {
+    preferred: opts?.preferred ?? 'SSE',
+    fallbackDelayMs: opts?.fallbackDelayMs ?? FALLBACK_MS,
+    recoveryDelayMs: opts?.recoveryDelayMs ?? RECOVERY_MS,
+    recoveryMaxDelayMs: opts?.recoveryMaxDelayMs,
+  };
+  return renderHook((props: HookProps) => useTransportFallback(props), { initialProps });
 }
 
 beforeEach(() => {
