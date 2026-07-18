@@ -21,6 +21,8 @@ export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';
 export type { SyncMetricsSnapshot } from './observability/metrics';
+export { configureQueryHealth } from './observability/query-health';
+export type { QueryHealthConfig } from './observability/query-health';
 
 // Persisted sync cache (WI-3318): host-app opt-in reload hydration of the sync
 // QueryClient — call enablePersistedSyncCache() at module-eval time.

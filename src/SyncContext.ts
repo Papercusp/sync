@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useCallback, useContext } from 'react';
+import { useQueryHealthObserver } from './observability/query-health';
 import type { SyncType, UseDataImpl, SyncQueryResult, SyncQueryOptions, PrefetchSyncFn, MutateImpl } from './types';
 
 interface SyncContextValue {
@@ -38,7 +39,14 @@ export function useSyncQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T
   if (!ctx) {
     return { data: undefined, loading: false, error: null } as unknown as SyncQueryResult<T>;
   }
-  return ctx.useDataImpl<T>(opts);
+  // (Hook-after-branch matches the existing useDataImpl pattern: ctx presence
+  // is stable for the life of the mount.)
+  const result = ctx.useDataImpl<T>(opts);
+  // Dev-time guardrails for the recurring fetch-defect class (waterfall /
+  // oversized payload / oversized row count / slow first load) — a no-op
+  // outside development. See observability/query-health.ts.
+  useQueryHealthObserver(opts, result as SyncQueryResult<unknown>);
+  return result;
 }
 
 /**
