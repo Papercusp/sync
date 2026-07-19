@@ -39,6 +39,12 @@ beforeEach(() => {
     rowsWarn: 10,
     payloadCheckMinRows: 2,
     slowFetchMsWarn: 50,
+    // High by default so the other suites never trip these; the churn/thrash
+    // suites lower their own threshold locally.
+    argsChurnWindowMs: 2_000,
+    argsChurnCountWarn: 100,
+    refetchWindowMs: 10_000,
+    refetchCountWarn: 100,
     warn,
   });
 });
@@ -104,6 +110,39 @@ describe('slow first load', () => {
     await new Promise((resolve) => setTimeout(resolve, 60));
     rerender({ o: opts(), r: res({ fetching: false, data: [{ ok: 1 }] }) });
     expect(warn.mock.calls.some(([m]) => String(m).includes('time the resolver'))).toBe(true);
+  });
+});
+
+describe('args-identity churn', () => {
+  it('warns when args change more than the threshold in the window', () => {
+    configureQueryHealth({ argsChurnCountWarn: 2 });
+    // fetching:false throughout ⇒ no fetch tracked ⇒ waterfall cannot fire,
+    // isolating the churn signal. Three arg changes trip the count>2 threshold.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { a: 1 } }), r: res() } },
+    );
+    rerender({ o: opts({ args: { a: 2 } }), r: res() });
+    rerender({ o: opts({ args: { a: 3 } }), r: res() });
+    rerender({ o: opts({ args: { a: 4 } }), r: res() });
+    expect(warn.mock.calls.some(([m]) => String(m).includes('unstable'))).toBe(true);
+  });
+});
+
+describe('refetch thrash', () => {
+  it('warns when the same query fetches more than the threshold in the window', () => {
+    configureQueryHealth({ refetchCountWarn: 2 });
+    // Stable args ⇒ no waterfall/churn; toggling fetching false→true is a fetch
+    // start. Three starts trip the count>2 threshold.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { a: 1 } }), r: res({ fetching: true }) } },
+    );
+    rerender({ o: opts({ args: { a: 1 } }), r: res({ fetching: false }) });
+    rerender({ o: opts({ args: { a: 1 } }), r: res({ fetching: true }) });
+    rerender({ o: opts({ args: { a: 1 } }), r: res({ fetching: false }) });
+    rerender({ o: opts({ args: { a: 1 } }), r: res({ fetching: true }) });
+    expect(warn.mock.calls.some(([m]) => String(m).includes('thrash'))).toBe(true);
   });
 });
 
