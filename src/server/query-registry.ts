@@ -46,16 +46,79 @@ export type NamedQueryResolver = (
   args: unknown,
 ) => Promise<unknown[] | NameNotFound>;
 
+/** Thrown when an entry's `resolve()` doesn't settle within `timeoutMs` — see
+ *  `CreateResolverOptions.timeoutMs`. Distinguishable from a downstream error
+ *  so a caller/route can map it to a specific status (e.g. 504) if it wants. */
+export class QueryResolveTimeoutError extends Error {
+  constructor(
+    public readonly queryName: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`query "${queryName}" did not resolve within ${timeoutMs}ms (resolver timeout)`);
+    this.name = 'QueryResolveTimeoutError';
+  }
+}
+
+export interface CreateResolverOptions {
+  /**
+   * Max ms to wait for a single entry's `resolve()` before rejecting with a
+   * {@link QueryResolveTimeoutError}. A resolver commonly awaits an
+   * unbounded downstream primitive (a connection-pool acquire, an fs walk)
+   * with no timeout of its own — when that primitive wedges (e.g. a starved
+   * PG pool: see dbos/pool-pressure.ts for the same failure class on the
+   * routines-tick path), the resolve() promise never settles, and with no
+   * bound here the HTTP request hangs indefinitely until the underlying
+   * wedge clears on its own (observed: advRoster.list, EI-18106470827657366
+   * — self-recovered after 5-8 minutes with no visible error in between).
+   * This turns that silent indefinite hang into a fast, loud, recoverable
+   * failure. 0/undefined disables (byte-identical to the pre-timeout
+   * behavior) — every existing caller that doesn't opt in is unaffected.
+   *
+   * NOTE: this bounds how long the CALLER waits — it does not cancel the
+   * underlying work. A timed-out resolve() keeps running in the background
+   * (its eventual settlement is swallowed); the fix for the wedge itself
+   * (e.g. a pool-acquire timeout) belongs in the resolver's own downstream
+   * primitive when one is available. This is the generic backstop for when
+   * it isn't.
+   */
+  timeoutMs?: number;
+}
+
 /**
  * Build a dispatcher over a registry. Validation failure throws (the
  * route handler maps it to HTTP); an unknown name returns NAME_NOT_FOUND.
+ * See {@link CreateResolverOptions.timeoutMs} to bound how long a single
+ * resolve() may hang before the dispatcher gives up and rejects.
  */
-export function createResolver(registry: QueryRegistry): NamedQueryResolver {
+export function createResolver(
+  registry: QueryRegistry,
+  opts: CreateResolverOptions = {},
+): NamedQueryResolver {
+  const timeoutMs = opts.timeoutMs ?? 0;
   return async (name: string, args: unknown): Promise<unknown[] | NameNotFound> => {
     const entry = registry[name];
     if (!entry) return NAME_NOT_FOUND;
     const validated = entry.argsSchema ? entry.argsSchema.parse(args) : args;
-    return entry.resolve(validated);
+    const resultPromise = entry.resolve(validated);
+    if (!timeoutMs) return resultPromise;
+    // The loser of the race below is never awaited again — attach a no-op
+    // handler now so a late rejection from a timed-out resolve() doesn't
+    // surface as an unhandled-rejection warning (Promise.race doesn't do
+    // this for you: the losing promise is still live, just unobserved).
+    resultPromise.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new QueryResolveTimeoutError(name, timeoutMs)), timeoutMs);
+      // Never let a pending resolver timeout keep the process alive.
+      if (timer && typeof (timer as { unref?: () => void }).unref === 'function') {
+        (timer as { unref: () => void }).unref();
+      }
+    });
+    try {
+      return await Promise.race([resultPromise, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   };
 }
 

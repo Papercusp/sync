@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   createResolver,
   knownQueryNames,
   isRegistered,
   NAME_NOT_FOUND,
+  QueryResolveTimeoutError,
   type QueryRegistry,
 } from './query-registry';
 
@@ -50,5 +51,63 @@ describe('query-registry', () => {
     expect(knownQueryNames(registry)).toEqual(['plans.get', 'plans.items']);
     expect(isRegistered(registry, 'plans.items')).toBe(true);
     expect(isRegistered(registry, 'plans.nope')).toBe(false);
+  });
+
+  describe('timeoutMs (EI-18106470827657366 — bound an indefinitely-hung resolver)', () => {
+    it('with no timeoutMs, a slow resolver is unaffected (default off, byte-identical)', async () => {
+      vi.useFakeTimers();
+      try {
+        const resolve = createResolver(registry); // no opts — same as before this change
+        const p = resolve('plans.items', {});
+        await vi.advanceTimersByTimeAsync(60_000);
+        await expect(p).resolves.toEqual([{ got: {} }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a resolver that never settles rejects with QueryResolveTimeoutError once timeoutMs elapses', async () => {
+      vi.useFakeTimers();
+      try {
+        const hangingRegistry: QueryRegistry = {
+          'wedged.query': {
+            // Simulates a stuck downstream await (e.g. a starved PG-pool
+            // acquire) — a promise that never resolves or rejects on its own.
+            resolve: () => new Promise(() => {}),
+          },
+        };
+        const resolve = createResolver(hangingRegistry, { timeoutMs: 10_000 });
+        const p = resolve('wedged.query', {});
+        // Attach a rejection handler immediately so vitest/node never sees this
+        // as an unhandled rejection while fake timers advance below.
+        const assertion = expect(p).rejects.toThrow(QueryResolveTimeoutError);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a resolver that settles before timeoutMs is unaffected', async () => {
+      const resolve = createResolver(registry, { timeoutMs: 10_000 });
+      await expect(resolve('plans.items', { a: 1 })).resolves.toEqual([{ got: { a: 1 } }]);
+    });
+
+    it('a resolver that rejects before timeoutMs propagates its real error, not a timeout', async () => {
+      const failingRegistry: QueryRegistry = {
+        'broken.query': {
+          resolve: async () => {
+            throw new Error('downstream boom');
+          },
+        },
+      };
+      const resolve = createResolver(failingRegistry, { timeoutMs: 10_000 });
+      await expect(resolve('broken.query', {})).rejects.toThrow('downstream boom');
+    });
+
+    it('NAME_NOT_FOUND still short-circuits before any timeout machinery', async () => {
+      const resolve = createResolver(registry, { timeoutMs: 10_000 });
+      expect(await resolve('nope.missing', {})).toBe(NAME_NOT_FOUND);
+    });
   });
 });

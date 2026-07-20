@@ -17,11 +17,13 @@ export {
   createResolver,
   knownQueryNames,
   isRegistered,
+  QueryResolveTimeoutError,
   type NameNotFound,
   type ArgsValidator,
   type QueryEntry,
   type QueryRegistry,
   type NamedQueryResolver,
+  type CreateResolverOptions,
 } from './query-registry';
 
 export {
