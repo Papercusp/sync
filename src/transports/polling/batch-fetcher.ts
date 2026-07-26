@@ -152,7 +152,7 @@ export function getBatchFetcher(restEndpoint: string, tokenQueryParam?: string):
     priority: BatchPriority = 'background',
   ) =>
     new Promise<BatchResult>((resolve, reject) => {
-      const lane = lanes['background']; // TEMP-BREAK: verify the WI-5851 guard bites
+      const lane = lanes[priority];
       lane.queue.push({ name, args, delta, resolve, reject });
       if (!lane.timer) {
         lane.timer = setTimeout(
