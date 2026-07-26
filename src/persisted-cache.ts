@@ -145,9 +145,16 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
       const state = dehydrate(client, {
         shouldDehydrateQuery: (q) => q.state.status === 'success' && q.meta?.persist !== false,
       });
-      // Stable comparison key: same shape as the envelope minus `ts` (which
-      // changes every flush regardless of whether `state` did).
-      const content = JSON.stringify({ v: ENVELOPE_VERSION, buster: opts.buster ?? '', state });
+      // Stable comparison key: same shape as the envelope minus `ts` AND minus
+      // each query's `dehydratedAt` (react-query stamps `dehydratedAt:
+      // Date.now()` into EVERY dehydrated query on EVERY dehydrate() call —
+      // call-time noise unrelated to whether the underlying data changed —
+      // so leaving it in the comparison would make every flush look "new"
+      // and defeat the dedup entirely).
+      const content = JSON.stringify(
+        { v: ENVELOPE_VERSION, buster: opts.buster ?? '', state },
+        (k, v) => (k === 'dehydratedAt' ? undefined : v),
+      );
       if (content === lastWrittenContent) return; // nothing persistable changed — skip the write
       const serialized = JSON.stringify({
         v: ENVELOPE_VERSION,
