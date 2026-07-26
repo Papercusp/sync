@@ -4,19 +4,26 @@ import { keepPreviousData, useQuery, type QueryClient } from '@tanstack/react-qu
 import { useCallback, useRef } from 'react';
 import type { SyncQueryOptions, SyncQueryResult } from '../../types';
 import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
-import { getBatchFetcher } from './batch-fetcher';
+import { DEFAULT_MAX_IN_FLIGHT, getQueryFetcher } from './query-fetcher';
 import { getQueryClient } from './queryClient';
 
 interface PollingConfig {
   restEndpoint: string;
   defaultPollIntervalMs: number;
   /**
-   * When set, appended as `?token=<encoded>` to every batch fetch.
+   * When set, appended as `?token=<encoded>` to every sync fetch.
    * Needed for clients that auth via query-string (Tauri WebView mobile
-   * cross-origin to a JWT-gated endpoint), since the batch fetcher uses
+   * cross-origin to a JWT-gated endpoint), since the fetcher uses
    * bare `fetch` and can't carry Authorization headers.
    */
   tokenQueryParam?: string;
+  /**
+   * Max sync requests in flight against this endpoint at once
+   * (default `DEFAULT_MAX_IN_FLIGHT` = 12). Shared by the hook, the prefetch
+   * helper and `fetchSyncQuery` — see query-fetcher.ts for why a cap is kept
+   * even though desktop IPC has no per-host connection limit.
+   */
+  maxInFlightFetches?: number;
 }
 
 // Stable singleton empty array so consumers that depend on `data` reference
@@ -26,14 +33,21 @@ interface PollingConfig {
 const EMPTY_ARRAY: readonly unknown[] = Object.freeze([]);
 
 export function createUsePollingQuery(config: PollingConfig) {
-  // One batching fetcher per endpoint — every query refetch (initial
-  // hydration, poll tick, SSE-invalidate wave) coalesces into a single
-  // `POST /rest-query-batch` instead of ~40 parallel `GET`s that would
-  // exhaust the browser's 6-connection-per-host HTTP/1.1 cap.
-  const batchFetch = getBatchFetcher(config.restEndpoint, config.tokenQueryParam);
+  // One fetcher (and one shared concurrency gate) per endpoint. Each query is
+  // its own `GET /rest-query`: a refetch wave of ~95 finishes faster this way
+  // than as one bundle AND paints incrementally, because a slow query occupies
+  // one slot instead of holding the whole wave's results hostage
+  // (drop-sync-batcher-2026-07-25 D-001). The gate is what keeps that safe on
+  // the two paths where a per-host connection cap is still real: the desktop's
+  // pre-`PAPERCUSP_IPC_READY` HTTP fallback, and the `:3055` dev browser.
+  const fetchQuery = getQueryFetcher(
+    config.restEndpoint,
+    config.tokenQueryParam,
+    config.maxInFlightFetches ?? DEFAULT_MAX_IN_FLIGHT,
+  );
 
   return function usePollingQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
-    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime, priority } = opts;
+    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime } = opts;
     const interval = pollIntervalMs ?? config.defaultPollIntervalMs;
     // Stable string key for the args object — useCallback dep that doesn't
     // churn on every render the way the `{}` default would.
