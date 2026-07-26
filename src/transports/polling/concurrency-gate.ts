@@ -83,7 +83,7 @@ export function createConcurrencyGate(limit: number): ConcurrencyGate {
     // Fast path only when nobody is already waiting — otherwise a late caller
     // could jump a queue it should be joining (FIFO is what keeps an early
     // hydration query from being starved by a steady drip of poll ticks).
-    if (active < max && waiters.length === 0) {
+    if (active < max) {
       active += 1;
       return Promise.resolve();
     }
