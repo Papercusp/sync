@@ -55,14 +55,19 @@ export function createUsePollingQuery(config: PollingConfig) {
 
     // Each fetcher invocation = a cache miss (network round-trip). Cache
     // hits (data returned without a fetch) are accounted below.
-    // `priority` picks the batch lane: an interactive query never waits on the
-    // background poll wave (WI-5851). Not part of the queryKey — it describes
-    // HOW to fetch, not WHAT is fetched, so two callers of the same query at
-    // different priorities must still share one cache entry.
-    const queryFn = useCallback(() => {
-      syncMetrics.cacheMiss();
-      return batchFetch(queryName, JSON.parse(argsKey), priority);
-    }, [queryName, argsKey, priority]);
+    //
+    // Destructuring `signal` is load-bearing, not decoration: react-query only
+    // marks a query as abort-signal-consuming when the queryFn *reads* that
+    // getter, and only then does it cancel the in-flight request when the last
+    // observer unsubscribes. Reading it here is what makes an unmounted panel
+    // stop paying for a fetch nobody will render.
+    const queryFn = useCallback(
+      ({ signal }: { signal: AbortSignal }) => {
+        syncMetrics.cacheMiss();
+        return fetchQuery(queryName, JSON.parse(argsKey), { signal });
+      },
+      [queryName, argsKey],
+    );
 
     const { data, isLoading, isFetching, isPlaceholderData, error, refetch } = useQuery({
       // The raw args object is safe here: TanStack v5 hashes query keys
@@ -114,12 +119,16 @@ export function createUsePollingQuery(config: PollingConfig) {
 }
 
 export function createPrefetchSync(config: PollingConfig, queryClient: QueryClient) {
-  const batchFetch = getBatchFetcher(config.restEndpoint, config.tokenQueryParam);
+  const fetchQuery = getQueryFetcher(
+    config.restEndpoint,
+    config.tokenQueryParam,
+    config.maxInFlightFetches ?? DEFAULT_MAX_IN_FLIGHT,
+  );
   return function prefetchSync(opts: SyncQueryOptions) {
     const { queryName, args = {} } = opts;
     void queryClient.prefetchQuery({
       queryKey: ['sync', queryName, args],
-      queryFn: () => batchFetch(queryName, args),
+      queryFn: ({ signal }) => fetchQuery(queryName, args, { signal }),
       staleTime: 30_000,
     });
   };
@@ -130,12 +139,20 @@ export function createPrefetchSync(config: PollingConfig, queryClient: QueryClie
 export async function fetchSyncQuery<T = unknown>(opts: SyncQueryOptions & {
   restEndpoint?: string;
   tokenQueryParam?: string;
+  maxInFlightFetches?: number;
 }): Promise<T[]> {
-  const { queryName, args = {}, staleTime = 30_000, restEndpoint = '/api/zero-harness', tokenQueryParam } = opts;
-  const batchFetch = getBatchFetcher(restEndpoint, tokenQueryParam);
+  const {
+    queryName,
+    args = {},
+    staleTime = 30_000,
+    restEndpoint = '/api/zero-harness',
+    tokenQueryParam,
+    maxInFlightFetches,
+  } = opts;
+  const fetchQuery = getQueryFetcher(restEndpoint, tokenQueryParam, maxInFlightFetches ?? DEFAULT_MAX_IN_FLIGHT);
   const result = await getQueryClient().fetchQuery({
     queryKey: ['sync', queryName, args],
-    queryFn: () => batchFetch(queryName, args),
+    queryFn: ({ signal }) => fetchQuery(queryName, args, { signal }),
     staleTime,
   });
   return result.rows as T[];

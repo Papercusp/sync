@@ -60,6 +60,17 @@ export interface SyncProviderProps {
    */
   tokenQueryParam?: string;
   /**
+   * Max sync requests in flight against the endpoint at once. Default 12.
+   *
+   * The polling/SSE transports issue ONE `GET /rest-query` per query and share
+   * a single concurrency gate across the hook, the prefetch helper and
+   * `fetchSyncQuery`. Raise it only with a measurement in hand: wall time is
+   * flat from ~6 to ~24 and per-query latency gets WORSE as the cap rises,
+   * because parallel resolvers contend for the same PG pool and event loop.
+   * See libs/generic/sync/src/transports/polling/query-fetcher.ts.
+   */
+  maxInFlightFetches?: number;
+  /**
    * Override the default SSE endpoint path (which is `${restEndpoint}/sse`).
    * Use the absolute path you want hit, e.g. `/api/device/sync/sse`.
    *
@@ -116,29 +127,17 @@ export interface SyncQueryOptions {
    * fresh by construction).
    */
   staleTime?: number;
-  /**
-   * Traffic class for the polling/SSE batch fetcher (WI-5851).
-   *
-   * `'background'` (the default) — the query is part of the ambient refetch
-   * wave. It is coalesced into the shared `POST /rest-query-batch` so a whole
-   * wave costs one connection instead of ~40.
-   *
-   * `'interactive'` — A HUMAN IS WAITING ON THIS FETCH (a click opened a
-   * detail pane, a row was selected). It gets its OWN batch, flushed on the
-   * next macrotask, and is never coalesced with background traffic.
-   *
-   * WHY THIS EXISTS: the batch is indivisible — the server resolves it with
-   * `Promise.all` and cannot respond until its SLOWEST member finishes. So
-   * without a separate lane, a 4ms detail read that lands in the same 12ms
-   * window as a poll wave inherits the wave's latency (measured 2.7-3.3s
-   * against a 4ms query; bounded only by the server's 8s per-slot timeout).
-   * Two traffic classes with opposite latency requirements must not share an
-   * indivisible batch. See batch-fetcher.ts.
-   *
-   * Cost: one extra connection per interactive fetch. Bounded by construction
-   * — interactive fetches happen at human click-rate, not poll-rate.
+  /*
+   * NOTE — `priority: 'interactive' | 'background'` used to live here (WI-5851)
+   * and was REMOVED on 2026-07-26 with the batcher it existed to steer
+   * (drop-sync-batcher-2026-07-25 P-005). It bought a click its own batch so it
+   * would not inherit a poll wave's latency through an indivisible bundle. With
+   * one request per query there is no bundle to be trapped in: every query is
+   * already independently dispatched and independently returned, so the lane
+   * split is not just unnecessary, it is unrepresentable. Nothing replaces it —
+   * do not reintroduce a hand-labelled priority; the label rotted (only queries
+   * someone remembered to tag were fast) and that rot is why it is gone.
    */
-  priority?: 'interactive' | 'background';
 }
 
 export interface SyncQueryResult<T = any> {

@@ -16,6 +16,8 @@ interface PollingAdapterProps {
   /** When set, every `/rest-query` URL gets `?token=<encoded>` appended.
    *  Mirrors the SSE adapter's `tokenQueryParam`. */
   tokenQueryParam?: string;
+  /** Max sync requests in flight at once (default 12). See query-fetcher.ts. */
+  maxInFlightFetches?: number;
   onTransportError?: (error: Error) => void;
   /** Accepted (and ignored) so SyncProvider can spread one commonProps
    *  shape into both adapters. The polling transport doesn't need a Zero
@@ -47,19 +49,20 @@ export function PollingAdapter({
   server,
   pollIntervalMs = 10_000,
   tokenQueryParam,
+  maxInFlightFetches,
 }: PollingAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   warnIfDefaultUsedInProd(endpoint);
   const queryClient = getQueryClient();
 
   const useDataImpl = useMemo(
-    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam }),
-    [endpoint, pollIntervalMs, tokenQueryParam],
+    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches }),
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches],
   );
 
   const prefetch = useMemo(
-    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam }, queryClient),
-    [endpoint, pollIntervalMs, tokenQueryParam, queryClient],
+    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches }, queryClient),
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryClient],
   );
 
   const ctxValue = useMemo(

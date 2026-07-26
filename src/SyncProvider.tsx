@@ -67,6 +67,7 @@ export function SyncProvider({
   tokenQueryParam,
   endpointOverride,
   visibilityPause,
+  maxInFlightFetches,
 }: SyncProviderProps) {
   const { activeTransport, onTransportError } = useTransportFallback({
     preferred: syncType,
@@ -89,6 +90,8 @@ export function SyncProvider({
     restEndpoint,
     pollIntervalMs,
     onTransportError,
+    // Shared by both adapters — both drive the same single-query fetcher.
+    maxInFlightFetches,
     // SSE-only knobs — the polling adapter ignores them.
     tokenQueryParam,
     endpointOverride,

@@ -66,25 +66,50 @@ describe('sync connectivity store', () => {
   });
 });
 
-describe('batch-fetcher connectivity reporting', () => {
+describe('query-fetcher connectivity reporting', () => {
   it('reports unreachable when fetch rejects and reachable on any HTTP response', async () => {
-    const { getBatchFetcher } = await import('./transports/polling/batch-fetcher');
+    const { getQueryFetcher } = await import('./transports/polling/query-fetcher');
 
     // Network-level failure → unreachable ×2 → offline.
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Load failed')));
-    const failing = getBatchFetcher('/conn-test-fail');
+    const failing = getQueryFetcher('/conn-test-fail');
     await expect(failing('q1', {})).rejects.toThrow();
     await expect(failing('q2', {})).rejects.toThrow();
     expect(getSyncConnectivity().offline).toBe(true);
 
     // An HTTP 500 response = origin reachable → recovers, even though the
-    // batch itself still rejects.
+    // query itself still rejects.
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(new Response('nope', { status: 500 })),
     );
-    const erroring = getBatchFetcher('/conn-test-500');
+    const erroring = getQueryFetcher('/conn-test-500');
     await expect(erroring('q3', {})).rejects.toThrow(/HTTP 500/);
+    expect(getSyncConnectivity().offline).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('does NOT report unreachable when the caller aborts its own request', async () => {
+    const { getQueryFetcher } = await import('./transports/polling/query-fetcher');
+    _resetSyncConnectivityForTests();
+
+    // A cancelled request proves nothing about the origin. Reporting it as
+    // unreachable would flip the whole app offline every time a panel unmounts
+    // mid-fetch — the transport would announce an outage it invented.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => {
+        const err = new Error('The operation was aborted.');
+        err.name = 'AbortError';
+        return Promise.reject(err);
+      }),
+    );
+    const fetcher = getQueryFetcher('/conn-test-abort');
+    const ac = new AbortController();
+    ac.abort();
+    await expect(fetcher('q1', {}, { signal: ac.signal })).rejects.toThrow();
+    await expect(fetcher('q2', {}, { signal: ac.signal })).rejects.toThrow();
     expect(getSyncConnectivity().offline).toBe(false);
 
     vi.unstubAllGlobals();
