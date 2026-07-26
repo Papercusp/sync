@@ -8,6 +8,12 @@ export {
   reportSyncUnreachable,
   _resetSyncConnectivityForTests,
   type SyncConnectivity,
+  useSyncStaleOperator,
+  getSyncStaleOperator,
+  onSyncStaleOperator,
+  reportSyncStaleOperator,
+  _resetSyncStaleOperatorForTests,
+  type SyncStaleOperator,
 } from './connectivity';
 export {
   lazyWithRetry,

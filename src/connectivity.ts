@@ -91,3 +91,75 @@ export function _resetSyncConnectivityForTests(): void {
   consecutiveFailures = 0;
   state = ONLINE;
 }
+
+/**
+ * Stale-operator store (WI-5956) — "is this client's build newer than the
+ * server it's talking to?" A DIFFERENT failure mode from connectivity above:
+ * the origin is fully reachable and answers every request, but a query the
+ * client's (freshly-rebuilt) code knows about doesn't exist yet in the
+ * (long-lived, unrestarted) server process — the desktop dev operator's
+ * defect this file exists for. The server already signals this precisely
+ * (`rest-query`'s `unknown queryName: <name>` 400) — this store is the
+ * missing consumer: it turns that per-query 400 into an app-wide, persistent
+ * "restart your operator" signal instead of one silently-broken panel.
+ *
+ * Unlike connectivity, this NEVER auto-clears on its own — a version skew
+ * doesn't self-heal by retrying (the server process is what's stale, not the
+ * request), so the only real fix is an operator restart. `_resetSyncStale...`
+ * exists for tests only.
+ */
+export interface SyncStaleOperator {
+  stale: boolean;
+  /** Every distinct queryName that has 404'd as unknown so far (small set in
+   *  practice — one per resolver added since the operator last restarted). */
+  queryNames: string[];
+}
+
+const NOT_STALE: SyncStaleOperator = { stale: false, queryNames: [] };
+
+let staleState: SyncStaleOperator = NOT_STALE;
+const staleListeners = new Set<() => void>();
+
+function setStaleState(next: SyncStaleOperator): void {
+  staleState = next;
+  for (const fn of staleListeners) {
+    try {
+      fn();
+    } catch {
+      /* a throwing subscriber never blocks the store */
+    }
+  }
+}
+
+/**
+ * Transport-side: a query failed with the server's `unknown queryName: X`
+ * shape — proof this client's code is newer than the server it's talking to.
+ * Idempotent per queryName (a flapping panel that keeps re-requesting the
+ * same missing query notifies subscribers once, not on every retry).
+ */
+export function reportSyncStaleOperator(queryName: string): void {
+  if (staleState.queryNames.includes(queryName)) return;
+  setStaleState({ stale: true, queryNames: [...staleState.queryNames, queryName] });
+}
+
+export function getSyncStaleOperator(): SyncStaleOperator {
+  return staleState;
+}
+
+/** Subscribe to stale-operator flips. Returns an unsubscribe function. */
+export function onSyncStaleOperator(fn: () => void): () => void {
+  staleListeners.add(fn);
+  return () => {
+    staleListeners.delete(fn);
+  };
+}
+
+/** React hook — re-renders when a new unknown-queryName is reported. SSR snapshot is not-stale. */
+export function useSyncStaleOperator(): SyncStaleOperator {
+  return useSyncExternalStore(onSyncStaleOperator, getSyncStaleOperator, () => NOT_STALE);
+}
+
+/** Test seam. */
+export function _resetSyncStaleOperatorForTests(): void {
+  staleState = NOT_STALE;
+}
