@@ -7,14 +7,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   _resetSyncConnectivityForTests,
+  _resetSyncStaleOperatorForTests,
   getSyncConnectivity,
+  getSyncStaleOperator,
   onSyncConnectivity,
+  onSyncStaleOperator,
   reportSyncReachable,
+  reportSyncStaleOperator,
   reportSyncUnreachable,
 } from './connectivity';
 
 beforeEach(() => {
   _resetSyncConnectivityForTests();
+  _resetSyncStaleOperatorForTests();
 });
 
 describe('sync connectivity store', () => {
@@ -66,6 +71,54 @@ describe('sync connectivity store', () => {
   });
 });
 
+describe('sync stale-operator store (WI-5956)', () => {
+  it('starts not-stale', () => {
+    expect(getSyncStaleOperator()).toEqual({ stale: false, queryNames: [] });
+  });
+
+  it('flips stale on the FIRST report — no debounce, no consecutive-count requirement', () => {
+    reportSyncStaleOperator('plans.attentionItem');
+    expect(getSyncStaleOperator()).toEqual({ stale: true, queryNames: ['plans.attentionItem'] });
+  });
+
+  it('accumulates distinct queryNames across multiple reports', () => {
+    reportSyncStaleOperator('plans.attentionItem');
+    reportSyncStaleOperator('work_items.detail');
+    expect(getSyncStaleOperator().queryNames).toEqual(['plans.attentionItem', 'work_items.detail']);
+  });
+
+  it('is idempotent per queryName — a flapping panel retrying the same missing query does not notify twice', () => {
+    const seen: string[][] = [];
+    const off = onSyncStaleOperator(() => seen.push([...getSyncStaleOperator().queryNames]));
+    reportSyncStaleOperator('plans.attentionItem');
+    reportSyncStaleOperator('plans.attentionItem');
+    reportSyncStaleOperator('plans.attentionItem');
+    expect(seen).toEqual([['plans.attentionItem']]);
+    off();
+  });
+
+  it('never auto-clears — unlike connectivity, there is no reportSyncOperatorFresh', () => {
+    reportSyncStaleOperator('plans.attentionItem');
+    expect(getSyncStaleOperator().stale).toBe(true);
+    // No recovery path exists by design (see connectivity.ts doc comment) — a
+    // version skew self-heals only via a real operator restart (full reload).
+  });
+
+  it('a throwing subscriber never blocks the store or other subscribers', () => {
+    const calls: string[] = [];
+    const offA = onSyncStaleOperator(() => {
+      calls.push('a');
+      throw new Error('boom');
+    });
+    const offB = onSyncStaleOperator(() => calls.push('b'));
+    reportSyncStaleOperator('plans.attentionItem');
+    expect(getSyncStaleOperator().stale).toBe(true);
+    expect(calls).toEqual(['a', 'b']);
+    offA();
+    offB();
+  });
+});
+
 describe('query-fetcher connectivity reporting', () => {
   it('reports unreachable when fetch rejects and reachable on any HTTP response', async () => {
     const { getQueryFetcher } = await import('./transports/polling/query-fetcher');
@@ -111,6 +164,54 @@ describe('query-fetcher connectivity reporting', () => {
     await expect(fetcher('q1', {}, { signal: ac.signal })).rejects.toThrow();
     await expect(fetcher('q2', {}, { signal: ac.signal })).rejects.toThrow();
     expect(getSyncConnectivity().offline).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('query-fetcher stale-operator reporting (WI-5956)', () => {
+  it('reports stale-operator on the exact "unknown queryName" 400 shape rest-query.ts uses', async () => {
+    const { getQueryFetcher } = await import('./transports/polling/query-fetcher');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: 'unknown queryName: plans.attentionItem', name: 'plans.attentionItem' }), {
+          status: 400,
+        }),
+      ),
+    );
+    const fetcher = getQueryFetcher('/stale-test-1');
+    await expect(fetcher('plans.attentionItem', {})).rejects.toThrow(/unknown queryName/);
+    expect(getSyncStaleOperator()).toEqual({ stale: true, queryNames: ['plans.attentionItem'] });
+    // Reachable too — an HTTP response (even a 400) proves the origin is up,
+    // same rule as every other HTTP error status.
+    expect(getSyncConnectivity().offline).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('does NOT report stale-operator for an unrelated 400 (e.g. bad args) — exact prefix match only', async () => {
+    const { getQueryFetcher } = await import('./transports/polling/query-fetcher');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'invalid args (not JSON)' }), { status: 400 })),
+    );
+    const fetcher = getQueryFetcher('/stale-test-2');
+    await expect(fetcher('some.query', {})).rejects.toThrow(/invalid args/);
+    expect(getSyncStaleOperator()).toEqual({ stale: false, queryNames: [] });
+
+    vi.unstubAllGlobals();
+  });
+
+  it('does NOT report stale-operator for a different status code, even with a similar-looking body', async () => {
+    const { getQueryFetcher } = await import('./transports/polling/query-fetcher');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'unknown queryName: q' }), { status: 500 })),
+    );
+    const fetcher = getQueryFetcher('/stale-test-3');
+    await expect(fetcher('q', {})).rejects.toThrow();
+    expect(getSyncStaleOperator().stale).toBe(false);
 
     vi.unstubAllGlobals();
   });
