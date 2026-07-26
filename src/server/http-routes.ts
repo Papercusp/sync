@@ -2,7 +2,7 @@
  * Framework-neutral HTTP handler factories for the sync server half.
  *
  * Each factory returns a `(req: Request) => Promise<Response>` using only
- * Web-standard Request/Response (+ node:zlib for gzip). The host mounts
+ * Web-standard Request/Response. The host mounts
  * them under whatever router it uses (the operator wraps each in a
  * `defineTool({ method, path, auth, handler })`). The named-query resolver
  * and the SSE primitives are INJECTED, so this module pulls in no domain
@@ -14,19 +14,8 @@
  *   GET  sse                               → text/event-stream (invalidate|update|heartbeat)
  */
 
-import { gzip as gzipCb } from 'node:zlib';
-import { promisify } from 'node:util';
 import { NAME_NOT_FOUND, type NamedQueryResolver } from './query-registry';
 import type { SyncEvent } from './invalidation-bus';
-
-// Async gzip — the sync-batch read path combines up to ~200 query results, and
-// `gzipSync` ran fully synchronously on the one HTTP/MCP event loop, blocking
-// every heartbeat + concurrent request for the duration of the compression
-// (operator-scalability-event-loop-2026-06-16 P1-2). `zlib.gzip` runs on
-// libuv's threadpool, so the loop stays free while it compresses.
-const gzip = promisify(gzipCb);
-
-const GZIP_MIN_BYTES = 1024;
 
 function jsonResponse(obj: unknown, status: number): Response {
   return new Response(JSON.stringify(obj), {
@@ -35,21 +24,19 @@ function jsonResponse(obj: unknown, status: number): Response {
   });
 }
 
-/** Gzip the body when the client accepts it and it's worth it. */
-async function bodyResponse(req: Request, body: string): Promise<Response> {
-  const acceptsGzip = (req.headers.get('accept-encoding') ?? '')
-    .toLowerCase()
-    .includes('gzip');
-  if (acceptsGzip && body.length >= GZIP_MIN_BYTES) {
-    return new Response(await gzip(body), {
-      status: 200,
-      headers: {
-        'content-type': 'application/json; charset=utf-8',
-        'content-encoding': 'gzip',
-        vary: 'accept-encoding',
-      },
-    });
-  }
+/**
+ * Send the body as-is. NO COMPRESSION — deliberate, do not re-add.
+ *
+ * This transport's shipping deployment is a local sidecar reached over
+ * loopback, where there is no bandwidth to trade CPU for: gzip costs real
+ * milliseconds on BOTH ends to shrink bytes that never leave the machine.
+ * (The previous async-gzip here existed only to keep `gzipSync` off the
+ * event loop — i.e. to hide the cost of work that did not need doing.)
+ *
+ * A host that genuinely serves this over a network should compress at its
+ * edge proxy, which is where content-encoding belongs.
+ */
+function bodyResponse(_req: Request, body: string): Response {
   return new Response(body, {
     status: 200,
     headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -77,7 +64,7 @@ export function createRestQueryHandler(
         return jsonResponse({ error: `unknown queryName: ${name}`, name }, 400);
       }
       if (req.signal.aborted) return new Response(null, { status: 499 });
-      return await bodyResponse(req, JSON.stringify({ rows, version: String(Date.now()) }));
+      return bodyResponse(req, JSON.stringify({ rows, version: String(Date.now()) }));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse({ error: msg, name }, 500);
@@ -126,7 +113,7 @@ export function createRestBatchHandler(
       }),
     );
     if (req.signal.aborted) return new Response(null, { status: 499 });
-    return await bodyResponse(req, JSON.stringify({ results }));
+    return bodyResponse(req, JSON.stringify({ results }));
   };
 }
 

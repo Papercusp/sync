@@ -75,6 +75,38 @@ describe('persisted sync cache', () => {
     stop();
   });
 
+  it('WI-5983: repeated debounce cycles with UNCHANGED content write only once (no perpetual identical-write loop)', () => {
+    // The regression this guards: with no backend reachable, EVERY query
+    // stays non-success forever, so the dehydrated snapshot never changes —
+    // but the query cache still fires `subscribe` on every failed-retry state
+    // transition, re-arming the debounce every cycle. Before the WI-5983 fix,
+    // that meant one localStorage write per debounce window, FOREVER, even
+    // though the persisted content was byte-identical every time (observed in
+    // the wild as an unbounded WAL-growth leak on a clean-room VM).
+    const storage = memoryStorage();
+    const setSpy = vi.spyOn(storage, 'setItem');
+    const client = track(new QueryClient());
+    const stop = startSyncCachePersistence({ client, storage });
+    client.setQueryData(['sync', 'q', {}], { rows: [1] });
+    vi.advanceTimersByTime(1000);
+    expect(setSpy).toHaveBeenCalledTimes(1);
+
+    // Simulate many more debounce cycles firing with NO change to the
+    // persistable state (e.g. only failed/errored queries churning) — each
+    // cycle still invokes flush(), but none should write again.
+    for (let cycle = 0; cycle < 20; cycle++) {
+      client.getQueryCache().notify({ type: 'observerResultsUpdated' } as never);
+      vi.advanceTimersByTime(1000);
+    }
+    expect(setSpy).toHaveBeenCalledTimes(1);
+
+    // A REAL change still writes.
+    client.setQueryData(['sync', 'q', {}], { rows: [1, 2] });
+    vi.advanceTimersByTime(1000);
+    expect(setSpy).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
   it('drops a snapshot written under a different buster', () => {
     const storage = memoryStorage();
     const source = track(new QueryClient());

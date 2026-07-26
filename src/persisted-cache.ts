@@ -127,11 +127,28 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
   const debounceMs = opts.debounceMs ?? DEFAULT_DEBOUNCE_MS;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
 
+  // WI-5983: dedup against the last WRITTEN payload (content only — the `ts`
+  // field is excluded from the comparison so a no-op tick doesn't count as a
+  // change). The query cache fires `subscribe` on every state transition —
+  // including retry/error churn from queries that never reach `success` (e.g.
+  // no backend reachable at all) — so with no backend the debounce above
+  // still re-fires every `debounceMs` FOREVER even though the dehydrated
+  // snapshot (no successful queries) never changes. Observed in the wild as a
+  // sustained ~1 write/sec localStorage-WAL leak with no human interaction
+  // (WI-5983: ~3GB/day, unbounded, on a clean-room VM with no reachable
+  // backend). Skipping the identical write breaks that loop without touching
+  // the debounce/backoff semantics for the normal (data-changing) case.
+  let lastWrittenContent: string | null = null;
+
   const flush = () => {
     try {
       const state = dehydrate(client, {
         shouldDehydrateQuery: (q) => q.state.status === 'success' && q.meta?.persist !== false,
       });
+      // Stable comparison key: same shape as the envelope minus `ts` (which
+      // changes every flush regardless of whether `state` did).
+      const content = JSON.stringify({ v: ENVELOPE_VERSION, buster: opts.buster ?? '', state });
+      if (content === lastWrittenContent) return; // nothing persistable changed — skip the write
       const serialized = JSON.stringify({
         v: ENVELOPE_VERSION,
         buster: opts.buster ?? '',
@@ -140,9 +157,11 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
       } satisfies Envelope);
       if (serialized.length > maxBytes) return; // over budget — keep the last good snapshot
       storage.setItem(key, serialized);
+      lastWrittenContent = content;
     } catch {
       // Quota / serialization failure: drop the stored snapshot so restore
       // never resurrects a half-written or perpetually-oversized entry.
+      lastWrittenContent = null;
       try {
         storage.removeItem(key);
       } catch {

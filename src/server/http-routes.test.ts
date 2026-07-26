@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest';
-import { gunzipSync } from 'node:zlib';
 import {
   createRestQueryHandler,
   createRestBatchHandler,
@@ -50,17 +49,22 @@ describe('createRestQueryHandler', () => {
     expect(res.status).toBe(500);
   });
 
-  it('gzips a large body when accept-encoding allows', async () => {
+  // NO WIRE COMPRESSION (2026-07-26). These are INVERSE guards: re-adding
+  // gzip to this transport must red here, not be discovered in a profile.
+  // Rationale: the shipping deployment is a loopback desktop sidecar, so
+  // compression only trades real CPU on both ends for bytes that never
+  // leave the machine.
+  it('does NOT compress a large body even when accept-encoding allows gzip', async () => {
     const res = await handler(
       new Request('http://t/rest-query?name=big', { headers: { 'accept-encoding': 'gzip' } }),
     );
-    expect(res.headers.get('content-encoding')).toBe('gzip');
-    const buf = Buffer.from(await res.arrayBuffer());
-    const json = JSON.parse(gunzipSync(buf).toString()) as { rows: unknown[] };
+    expect(res.headers.get('content-encoding')).toBeNull();
+    // Body is readable as plain JSON — no decompression step.
+    const json = (await res.json()) as { rows: unknown[] };
     expect(json.rows).toHaveLength(1);
   });
 
-  it('does not gzip a small body even when accept-encoding allows', async () => {
+  it('does NOT compress a small body when accept-encoding allows gzip', async () => {
     const res = await handler(
       new Request('http://t/rest-query?name=q', { headers: { 'accept-encoding': 'gzip' } }),
     );
@@ -110,7 +114,8 @@ describe('createRestBatchHandler', () => {
     expect(body.results[2].error).toMatch(/kaboom/);
   });
 
-  it('async-gzips a large batch body and it round-trips', async () => {
+  // Inverse guard — see the rest-query block above.
+  it('does NOT compress a large batch body even when accept-encoding allows gzip', async () => {
     const res = await handler(
       new Request('http://t/batch', {
         method: 'POST',
@@ -118,9 +123,8 @@ describe('createRestBatchHandler', () => {
         body: JSON.stringify({ queries: [{ name: 'big' }] }),
       }),
     );
-    expect(res.headers.get('content-encoding')).toBe('gzip');
-    const buf = Buffer.from(await res.arrayBuffer());
-    const json = JSON.parse(gunzipSync(buf).toString()) as { results: Array<{ rows: unknown[] }> };
+    expect(res.headers.get('content-encoding')).toBeNull();
+    const json = (await res.json()) as { results: Array<{ rows: unknown[] }> };
     expect(json.results[0].rows).toHaveLength(1);
   });
 });
