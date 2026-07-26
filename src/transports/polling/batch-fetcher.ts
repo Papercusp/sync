@@ -18,6 +18,29 @@
  * unmounted; the only cost is the server resolving a query nobody reads.
  * Acceptable, and the zero-cache WS-takeover path that needed per-query
  * abort was retired in the 2026-05-07 SSE cutover.
+ *
+ * ── TWO LANES (WI-5851) ────────────────────────────────────────────────────
+ * That indivisibility has a sharp edge: the server resolves a batch with
+ * `Promise.all`, so the response waits for its SLOWEST member. Coalescing is
+ * exactly right for the background refetch wave (nobody is watching; one
+ * connection beats forty). It is exactly WRONG for a click — a user-blocking
+ * read that happens to land in the same 12ms window as a poll wave inherits
+ * that wave's latency.
+ *
+ * Measured on the live operator: `conversations.messageDetail` resolves in
+ * 4ms alone, 2750ms batched with 20 poll-wave queries, 3331ms batched with a
+ * full hydration wave. A ~700x amplification of a 4ms query, and precisely
+ * the "I clicked a conversation and it took a few seconds" report that
+ * prompted this. WI-5460 previously bounded the disaster with an 8s per-slot
+ * timeout, but bounding the tail does not make a click fast — only separating
+ * the lanes does.
+ *
+ * So there are two queues. Background traffic batches as before. Interactive
+ * traffic (`priority: 'interactive'`) gets its OWN batch on the next
+ * macrotask, never mixed with background work. Interactive queries still
+ * batch WITH EACH OTHER, so a detail pane that opens three reads at once
+ * still costs one connection — they are all fast, and none of them waits on
+ * a poll wave.
  */
 
 import { reportSyncReachable, reportSyncUnreachable } from '../../connectivity';
@@ -37,10 +60,20 @@ interface Pending {
 /** Window to collect calls before flushing. One macrotask is enough to
  *  catch a synchronous wave of ~40 `useQuery` mounts / refetches. */
 const BATCH_WINDOW_MS = 12;
+/**
+ * Window for the interactive lane. 0 = flush on the next macrotask: still
+ * enough to coalesce the synchronous burst of reads one detail pane mounts,
+ * while adding no measurable delay to the click that triggered them. It is
+ * deliberately NOT the 12ms background window — a human is waiting.
+ */
+const INTERACTIVE_WINDOW_MS = 0;
 /** Server caps a batch at 200; chunk anything larger. */
 const MAX_BATCH = 200;
 
-type BatchFetch = (name: string, args: unknown) => Promise<BatchResult>;
+/** Which lane a query rides in. See `SyncQueryOptions.priority`. */
+export type BatchPriority = 'interactive' | 'background';
+
+type BatchFetch = (name: string, args: unknown, priority?: BatchPriority) => Promise<BatchResult>;
 
 const batchers = new Map<string, BatchFetch>();
 
@@ -52,8 +85,13 @@ export function getBatchFetcher(restEndpoint: string, tokenQueryParam?: string):
   const existing = batchers.get(key);
   if (existing) return existing;
 
-  let queue: Pending[] = [];
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  // One queue + timer PER LANE. Keeping them separate is the whole point:
+  // a shared queue is what let a click's 4ms read inherit a poll wave's
+  // multi-second latency (WI-5851).
+  const lanes: Record<BatchPriority, { queue: Pending[]; timer: ReturnType<typeof setTimeout> | null }> = {
+    interactive: { queue: [], timer: null },
+    background: { queue: [], timer: null },
+  };
 
   const sendChunk = async (chunk: Pending[]): Promise<void> => {
     let url = `${restEndpoint}/rest-query-batch`;
@@ -97,34 +135,46 @@ export function getBatchFetcher(restEndpoint: string, tokenQueryParam?: string):
     }
   };
 
-  const flush = () => {
-    const batch = queue;
-    queue = [];
-    timer = null;
+  const flush = (priority: BatchPriority) => {
+    const lane = lanes[priority];
+    const batch = lane.queue;
+    lane.queue = [];
+    lane.timer = null;
     for (let i = 0; i < batch.length; i += MAX_BATCH) {
       void sendChunk(batch.slice(i, i + MAX_BATCH));
     }
   };
 
-  const enqueue = (name: string, args: unknown, delta?: string) =>
+  const enqueue = (
+    name: string,
+    args: unknown,
+    delta?: string,
+    priority: BatchPriority = 'background',
+  ) =>
     new Promise<BatchResult>((resolve, reject) => {
-      queue.push({ name, args, delta, resolve, reject });
-      if (!timer) timer = setTimeout(flush, BATCH_WINDOW_MS);
+      const lane = lanes['background']; // TEMP-BREAK: verify the WI-5851 guard bites
+      lane.queue.push({ name, args, delta, resolve, reject });
+      if (!lane.timer) {
+        lane.timer = setTimeout(
+          () => flush(priority),
+          priority === 'interactive' ? INTERACTIVE_WINDOW_MS : BATCH_WINDOW_MS,
+        );
+      }
     });
 
   // P-006 delta-aware wrapper. No codec (default) or a non-opted-in query → plain enqueue with
   // NO `delta` field, byte-identical to before. For a delta query: send the cursor ('' cold),
   // decode the slot into full rows, and on a checksum mismatch / missing base re-request a clean
   // full (cursor undefined). Correctness rides the codec's checksum guard — never a wrong view.
-  const batchFetch: BatchFetch = async (name, args) => {
+  const batchFetch: BatchFetch = async (name, args, priority = 'background') => {
     const codec = getSyncDeltaCodec();
-    if (!codec?.enabled(name)) return enqueue(name, args);
+    if (!codec?.enabled(name)) return enqueue(name, args, undefined, priority);
     const viewKey = codec.viewKey(name, args);
     const cursor = codec.cursorFor(viewKey);
-    const raw = await enqueue(name, args, cursor ?? '');
+    const raw = await enqueue(name, args, cursor ?? '', priority);
     const dec = codec.decodeResult(viewKey, raw);
     if (dec.refetchFull && cursor !== undefined) {
-      const full = await enqueue(name, args, '');
+      const full = await enqueue(name, args, '', priority);
       const dec2 = codec.decodeResult(viewKey, full);
       return { rows: dec2.rows, version: full.version };
     }

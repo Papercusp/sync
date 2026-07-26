@@ -116,6 +116,29 @@ export interface SyncQueryOptions {
    * fresh by construction).
    */
   staleTime?: number;
+  /**
+   * Traffic class for the polling/SSE batch fetcher (WI-5851).
+   *
+   * `'background'` (the default) — the query is part of the ambient refetch
+   * wave. It is coalesced into the shared `POST /rest-query-batch` so a whole
+   * wave costs one connection instead of ~40.
+   *
+   * `'interactive'` — A HUMAN IS WAITING ON THIS FETCH (a click opened a
+   * detail pane, a row was selected). It gets its OWN batch, flushed on the
+   * next macrotask, and is never coalesced with background traffic.
+   *
+   * WHY THIS EXISTS: the batch is indivisible — the server resolves it with
+   * `Promise.all` and cannot respond until its SLOWEST member finishes. So
+   * without a separate lane, a 4ms detail read that lands in the same 12ms
+   * window as a poll wave inherits the wave's latency (measured 2.7-3.3s
+   * against a 4ms query; bounded only by the server's 8s per-slot timeout).
+   * Two traffic classes with opposite latency requirements must not share an
+   * indivisible batch. See batch-fetcher.ts.
+   *
+   * Cost: one extra connection per interactive fetch. Bounded by construction
+   * — interactive fetches happen at human click-rate, not poll-rate.
+   */
+  priority?: 'interactive' | 'background';
 }
 
 export interface SyncQueryResult<T = any> {

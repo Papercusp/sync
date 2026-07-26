@@ -33,7 +33,7 @@ export function createUsePollingQuery(config: PollingConfig) {
   const batchFetch = getBatchFetcher(config.restEndpoint, config.tokenQueryParam);
 
   return function usePollingQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
-    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime } = opts;
+    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime, priority } = opts;
     const interval = pollIntervalMs ?? config.defaultPollIntervalMs;
     // Stable string key for the args object — useCallback dep that doesn't
     // churn on every render the way the `{}` default would.
@@ -41,10 +41,14 @@ export function createUsePollingQuery(config: PollingConfig) {
 
     // Each fetcher invocation = a cache miss (network round-trip). Cache
     // hits (data returned without a fetch) are accounted below.
+    // `priority` picks the batch lane: an interactive query never waits on the
+    // background poll wave (WI-5851). Not part of the queryKey — it describes
+    // HOW to fetch, not WHAT is fetched, so two callers of the same query at
+    // different priorities must still share one cache entry.
     const queryFn = useCallback(() => {
       syncMetrics.cacheMiss();
-      return batchFetch(queryName, JSON.parse(argsKey));
-    }, [queryName, argsKey]);
+      return batchFetch(queryName, JSON.parse(argsKey), priority);
+    }, [queryName, argsKey, priority]);
 
     const { data, isLoading, isFetching, isPlaceholderData, error, refetch } = useQuery({
       // The raw args object is safe here: TanStack v5 hashes query keys

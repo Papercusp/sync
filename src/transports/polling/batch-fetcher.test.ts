@@ -179,6 +179,113 @@ describe('getBatchFetcher', () => {
   });
 });
 
+/**
+ * WI-5851 — the interactive lane.
+ *
+ * REGRESSION THESE PIN: a batch is indivisible (the server resolves it with
+ * `Promise.all` and answers only when its slowest member does). While every
+ * query shared one queue, a click-triggered 4ms detail read that landed in the
+ * same 12ms window as the background poll wave inherited that wave's latency —
+ * measured at 2.7-3.3s against the live operator.
+ *
+ * The invariant is therefore about BATCH MEMBERSHIP, not timing: an
+ * interactive query must never appear in the same HTTP request as a background
+ * one. Assert on the request bodies so the guard survives any future retuning
+ * of the window constants.
+ */
+describe('getBatchFetcher — interactive lane (WI-5851)', () => {
+  /** Query names in each POST body, in call order. */
+  const bodiesOf = (mockFetch: any): string[][] =>
+    mockFetch.mock.calls.map((c: any[]) =>
+      (JSON.parse(c[1].body as string).queries as Array<{ name: string }>).map((q) => q.name),
+    );
+
+  it('never puts an interactive query in the same batch as a background one', async () => {
+    const endpoint = ep();
+    const mockFetch = vi.fn().mockImplementation(async (_url: string, init: any) => {
+      const { queries } = JSON.parse(init.body as string) as { queries: Array<{ name: string }> };
+      return { ok: true, json: async () => ({ results: queries.map((q) => ({ rows: [q.name], version: 'v' })) }) };
+    });
+    global.fetch = mockFetch;
+
+    const fetcher = getBatchFetcher(endpoint);
+    // The exact interleaving that caused the bug: a poll wave and a click land
+    // in the same tick.
+    const bg1 = fetcher('plans.attention', {}, 'background');
+    const click = fetcher('conversations.messageDetail', { id: 'm1' }, 'interactive');
+    const bg2 = fetcher('learning.hiveThroughput', {}, 'background');
+
+    vi.advanceTimersByTime(20);
+    await Promise.all([bg1, click, bg2]);
+
+    const bodies = bodiesOf(mockFetch);
+    const mixed = bodies.find(
+      (names) =>
+        names.includes('conversations.messageDetail') &&
+        names.some((n) => n === 'plans.attention' || n === 'learning.hiveThroughput'),
+    );
+    expect(mixed).toBeUndefined();
+    // And the click really did go out on its own request.
+    expect(bodies).toContainEqual(['conversations.messageDetail']);
+  });
+
+  it('flushes the interactive lane BEFORE the background window elapses', async () => {
+    const endpoint = ep();
+    const mockFetch = vi.fn().mockImplementation(async (_url: string, init: any) => {
+      const { queries } = JSON.parse(init.body as string) as { queries: Array<{ name: string }> };
+      return { ok: true, json: async () => ({ results: queries.map((q) => ({ rows: [q.name], version: 'v' })) }) };
+    });
+    global.fetch = mockFetch;
+
+    const fetcher = getBatchFetcher(endpoint);
+    void fetcher('plans.attention', {}, 'background');
+    void fetcher('conversations.messageDetail', { id: 'm1' }, 'interactive');
+
+    // Next macrotask only — short of the 12ms background window.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bodiesOf(mockFetch)).toEqual([['conversations.messageDetail']]);
+  });
+
+  it('still coalesces interactive queries WITH EACH OTHER (one pane, one connection)', async () => {
+    const endpoint = ep();
+    const mockFetch = vi.fn().mockImplementation(async (_url: string, init: any) => {
+      const { queries } = JSON.parse(init.body as string) as { queries: Array<{ name: string }> };
+      return { ok: true, json: async () => ({ results: queries.map((q) => ({ rows: [q.name], version: 'v' })) }) };
+    });
+    global.fetch = mockFetch;
+
+    const fetcher = getBatchFetcher(endpoint);
+    const a = fetcher('conversations.questionDetail', { id: 'c1' }, 'interactive');
+    const b = fetcher('conversations.messageDetail', { id: 'm1' }, 'interactive');
+
+    vi.advanceTimersByTime(20);
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(bodiesOf(mockFetch)).toEqual([
+      ['conversations.questionDetail', 'conversations.messageDetail'],
+    ]);
+    expect(ra.rows).toEqual(['conversations.questionDetail']);
+    expect(rb.rows).toEqual(['conversations.messageDetail']);
+  });
+
+  it('defaults to the background lane when no priority is given', async () => {
+    const endpoint = ep();
+    const mockFetch = vi.fn().mockImplementation(async (_url: string, init: any) => {
+      const { queries } = JSON.parse(init.body as string) as { queries: Array<{ name: string }> };
+      return { ok: true, json: async () => ({ results: queries.map((q) => ({ rows: [q.name], version: 'v' })) }) };
+    });
+    global.fetch = mockFetch;
+
+    const fetcher = getBatchFetcher(endpoint);
+    const p1 = fetcher('a', {});
+    const p2 = fetcher('b', {}, 'background');
+    vi.advanceTimersByTime(20);
+    await Promise.all([p1, p2]);
+
+    expect(bodiesOf(mockFetch)).toEqual([['a', 'b']]);
+  });
+});
+
 describe('getBatchFetcher — rows-delta (P-006)', () => {
   afterEach(() => {
     setSyncDeltaCodec(null);
