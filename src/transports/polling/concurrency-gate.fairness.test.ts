@@ -16,13 +16,20 @@
  *
  *     at every observable point:  inFlight < limit  ⟹  queued === 0
  *
- * So the guard is defensive, and today it is unreachable-as-a-bug. KEEP BOTH
- * the guard and this test anyway: the invariant above is what actually makes
- * the fast path safe, and it is one refactor away from being false. If anyone
- * makes pump asynchronous — a microtask hop, a scheduler yield, an await
- * between the decrement and the pump — the guard starts carrying real weight
- * and this file fails LOUDLY, instead of FIFO fairness degrading silently in
- * production under exactly the wave this gate exists to order.
+ * So the guard is defensive, and today it is unreachable-as-a-bug. Keep it —
+ * it is what makes the fast path safe if pump ever stops being synchronous.
+ *
+ * WHAT THIS FILE IS AND IS NOT WORTH. It adds coverage the behavioural suite
+ * lacks: FIFO admission under RANDOMISED arrival/completion schedules (that
+ * suite checks one fixed 3-waiter ordering), and `setLimit` in the LOWERING
+ * direction (it only covers raising). The invariant assertion documents the
+ * property the fast path depends on.
+ *
+ * Its limit, measured rather than assumed: observation happens on macrotask
+ * boundaries, so it CANNOT see a violation narrower than that. A pump deferred
+ * by a single microtask was tried as a mutant and produced zero violations
+ * here — this file would NOT catch that refactor. Do not treat a green run as
+ * proof that pump is still synchronous; for that, read `run`'s `finally`.
  */
 import { describe, expect, it } from 'vitest';
 import { createConcurrencyGate } from './concurrency-gate';
@@ -93,31 +100,47 @@ describe('concurrency-gate fairness invariant', () => {
     }
   });
 
-  it('holds the invariant across setLimit in both directions', async () => {
-    const gate = createConcurrencyGate(2);
-    const inFlight: Array<() => void> = [];
-    const runs = Array.from({ length: 8 }, () =>
+  it('a LOWERED setLimit actually throttles subsequent admissions', async () => {
+    // The behavioural suite covers RAISING (waiters admitted immediately). This
+    // covers lowering, where the gate is transiently over-subscribed: the real
+    // property is that once the surplus drains, the NEW ceiling is respected —
+    // not merely that the invariant holds while over-subscribed (which is
+    // vacuously true, since inFlight > limit there).
+    const gate = createConcurrencyGate(4);
+    const releases: Array<() => void> = [];
+    let concurrent = 0;
+    let peakAfterLowering = 0;
+    let lowered = false;
+
+    const runs = Array.from({ length: 14 }, () =>
       gate.run(async () => {
-        await new Promise<void>((res) => inFlight.push(res));
+        concurrent += 1;
+        if (lowered) peakAfterLowering = Math.max(peakAfterLowering, concurrent);
+        await new Promise<void>((res) => releases.push(() => res()));
+        concurrent -= 1;
       }),
     );
     await tick();
-    expect(gate.inFlight).toBe(2);
+    expect(gate.inFlight).toBe(4);
 
-    gate.setLimit(5); // raise: pump must immediately absorb the slack
-    await tick();
-    expect(gate.inFlight < gate.limit && gate.queued > 0).toBe(false);
-    expect(gate.inFlight).toBe(5);
-
-    gate.setLimit(1); // lower: over-subscribed, but still no free-slot-with-waiter
-    await tick();
-    expect(gate.inFlight < gate.limit && gate.queued > 0).toBe(false);
-
-    while (inFlight.length > 0) {
-      inFlight.shift()!();
+    gate.setLimit(1);
+    lowered = true;
+    // Drain everything; every admission from here on must respect the new cap.
+    while (releases.length > 0) {
+      releases.shift()!();
       await tick();
       expect(gate.inFlight < gate.limit && gate.queued > 0).toBe(false);
     }
     await Promise.all(runs);
+
+    expect(gate.limit).toBe(1);
+    // The load-bearing assertion: every admission made AFTER the lowering
+    // happened under the new cap of 1, so concurrency at those moments is 1 —
+    // not the old 4. Bounding by 4 here would be vacuous (it was the original
+    // limit and therefore cannot fail); bounding by 1 is what fails if
+    // setLimit's new value never reaches `pump`.
+    expect(peakAfterLowering).toBeLessThanOrEqual(1);
+    expect(gate.inFlight).toBe(0);
+    expect(gate.queued).toBe(0);
   });
 });
