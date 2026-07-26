@@ -96,7 +96,7 @@ interface SSEAdapterProps {
   endpointOverride?: string;
   /** Pause EventSource when document hidden >5min. */
   visibilityPause?: boolean;
-  /** Max sync requests in flight at once (default 12). See query-fetcher.ts. */
+  /** Max sync requests in flight at once (default 24). See query-fetcher.ts. */
   maxInFlightFetches?: number;
 }
 

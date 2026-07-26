@@ -19,7 +19,7 @@ interface PollingConfig {
   tokenQueryParam?: string;
   /**
    * Max sync requests in flight against this endpoint at once
-   * (default `DEFAULT_MAX_IN_FLIGHT` = 12). Shared by the hook, the prefetch
+   * (default `DEFAULT_MAX_IN_FLIGHT` = 24). Shared by the hook, the prefetch
    * helper and `fetchSyncQuery` — see query-fetcher.ts for why a cap is kept
    * even though desktop IPC has no per-host connection limit.
    */

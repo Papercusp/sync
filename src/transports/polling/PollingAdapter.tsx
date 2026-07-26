@@ -16,7 +16,7 @@ interface PollingAdapterProps {
   /** When set, every `/rest-query` URL gets `?token=<encoded>` appended.
    *  Mirrors the SSE adapter's `tokenQueryParam`. */
   tokenQueryParam?: string;
-  /** Max sync requests in flight at once (default 12). See query-fetcher.ts. */
+  /** Max sync requests in flight at once (default 24). See query-fetcher.ts. */
   maxInFlightFetches?: number;
   onTransportError?: (error: Error) => void;
   /** Accepted (and ignored) so SyncProvider can spread one commonProps

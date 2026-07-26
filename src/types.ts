@@ -60,14 +60,18 @@ export interface SyncProviderProps {
    */
   tokenQueryParam?: string;
   /**
-   * Max sync requests in flight against the endpoint at once. Default 12.
+   * Max sync requests in flight against the endpoint at once. Default 24.
    *
    * The polling/SSE transports issue ONE `GET /rest-query` per query and share
    * a single concurrency gate across the hook, the prefetch helper and
-   * `fetchSyncQuery`. Raise it only with a measurement in hand: wall time is
-   * flat from ~6 to ~24 and per-query latency gets WORSE as the cap rises,
-   * because parallel resolvers contend for the same PG pool and event loop.
-   * See libs/generic/sync/src/transports/polling/query-fetcher.ts.
+   * `fetchSyncQuery`. Change it only with a measurement taken over the
+   * transport you actually ship on: over loopback HTTP wall time looks flat
+   * from ~6 to ~24, but over the desktop's Tauri IPC path it is not — a
+   * 106-query wave measured 4981ms at 12 versus 2922ms at 24 (medians). The
+   * cost of raising it is per-query latency (p50 212ms → 395ms) as parallel
+   * resolvers contend for the same PG pool and event loop.
+   * See libs/generic/sync/src/transports/polling/query-fetcher.ts (and plan
+   * drop-sync-batcher-2026-07-25 D-003).
    */
   maxInFlightFetches?: number;
   /**
