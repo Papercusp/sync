@@ -21,6 +21,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CONNECTION_CAPPED_MAX_IN_FLIGHT,
   DEFAULT_MAX_IN_FLIGHT,
   getFetchGate,
   getQueryFetcher,
@@ -127,6 +128,44 @@ describe('getQueryFetcher — request shape', () => {
     // second gate — that would multiply the cap by the number of callers.
     getQueryFetcher(e, undefined, 4);
     expect(getFetchGate(e)!.limit).toBe(4);
+  });
+});
+
+describe('CONNECTION_CAPPED_MAX_IN_FLIGHT (WI-6253)', () => {
+  it('is a safe floor strictly below DEFAULT_MAX_IN_FLIGHT and below the ~6-per-host browser cap', () => {
+    // The whole defect this constant fixes is DEFAULT_MAX_IN_FLIGHT (IPC-tuned,
+    // 24) being applied on paths with a REAL per-host connection cap — a value
+    // that isn't meaningfully lower than 6 would not fix that.
+    expect(CONNECTION_CAPPED_MAX_IN_FLIGHT).toBeLessThan(DEFAULT_MAX_IN_FLIGHT);
+    expect(CONNECTION_CAPPED_MAX_IN_FLIGHT).toBeLessThan(6);
+    expect(CONNECTION_CAPPED_MAX_IN_FLIGHT).toBeGreaterThan(0);
+  });
+
+  it('getQueryFetcher actually enforces it as the in-flight cap when passed explicitly', async () => {
+    let concurrent = 0;
+    let peak = 0;
+    const release = deferred();
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => {
+      concurrent += 1;
+      peak = Math.max(peak, concurrent);
+      await release.promise;
+      concurrent -= 1;
+      return okResponse({ rows: [], version: 'v' });
+    }));
+
+    const e = ep();
+    const fetcher = getQueryFetcher(e, undefined, CONNECTION_CAPPED_MAX_IN_FLIGHT);
+    expect(getFetchGate(e)!.limit).toBe(CONNECTION_CAPPED_MAX_IN_FLIGHT);
+
+    const all = Promise.all(
+      Array.from({ length: CONNECTION_CAPPED_MAX_IN_FLIGHT * 3 }, (_, i) => fetcher(`q${i}`, {})),
+    );
+    await tick();
+
+    expect(peak).toBe(CONNECTION_CAPPED_MAX_IN_FLIGHT);
+    release.resolve();
+    await all;
+    expect(peak).toBe(CONNECTION_CAPPED_MAX_IN_FLIGHT);
   });
 });
 
