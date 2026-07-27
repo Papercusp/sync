@@ -23,6 +23,10 @@ export {
 } from './lazy-with-retry';
 export { useSyncQuery, useSyncMutate, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
 export { fetchSyncQuery } from './transports/polling/usePollingQuery';
+export {
+  DEFAULT_MAX_IN_FLIGHT,
+  CONNECTION_CAPPED_MAX_IN_FLIGHT,
+} from './transports/polling/query-fetcher';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';
