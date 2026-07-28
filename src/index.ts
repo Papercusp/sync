@@ -26,6 +26,12 @@ export { fetchSyncQuery } from './transports/polling/usePollingQuery';
 export {
   DEFAULT_MAX_IN_FLIGHT,
   CONNECTION_CAPPED_MAX_IN_FLIGHT,
+  // Published because a CALLER cannot set its own ceiling correctly without it:
+  // any caller-side timeout must sit ABOVE this one, or it pre-empts the sync
+  // layer's real rejection message with an opaque timeout of its own (P-009 /
+  // WI-6559). The ordering is load-bearing, so the number has to be readable
+  // rather than duplicated as a literal at each call site.
+  DEFAULT_REQUEST_TIMEOUT_MS,
 } from './transports/polling/query-fetcher';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
