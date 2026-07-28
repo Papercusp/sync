@@ -147,7 +147,7 @@ interface Fetcher {
 const fetchers = new Map<string, Fetcher>();
 
 const keyFor = (restEndpoint: string, tokenQueryParam?: string): string =>
-  `${restEndpoint} ${tokenQueryParam ?? ''}`;
+  `${restEndpoint}\u0000${tokenQueryParam ?? ''}`;
 
 /** True when `err` is this request's own cancellation rather than a transport failure. */
 function isAbortError(err: unknown, signal?: AbortSignal): boolean {
