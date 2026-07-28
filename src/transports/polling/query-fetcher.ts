@@ -297,6 +297,75 @@ export function getQueryFetcher(
     }
   };
 
+  /**
+   * One gated request under a TOTAL deadline — one that starts when the caller
+   * asks, so it covers the QUEUE WAIT as well as the request itself.
+   *
+   * WI-6559, second half. `gate.run(fn)` is `await acquire()` and THEN `fn()`,
+   * and `sendOne` arms its deadline INSIDE `fn` — so that deadline bounds only
+   * the request, never the wait to be ALLOWED to make one. A caller queued
+   * behind a saturated gate was therefore unbounded: no timeout, no rejection,
+   * no console output. That is precisely the silent-hang shape the deadline was
+   * written to prevent, surviving in the QUEUED position.
+   *
+   * Measured live (2026-07-28, Tauri webview): a COLD page's Grade click never
+   * produced a card at all — 30s, no error — while the SAME click on a warm
+   * page answered in 250ms, because warm hit react-query's cache and never
+   * touched the gate. The cold page's startup query wave saturates the gate,
+   * `rubrics.list` queues, and nothing ever bounds the wait; the caller's own
+   * 30s ceiling then fires, which is the owner's verbatim "click Grade, wait
+   * 30s, get an error".
+   *
+   * Aborting `queueDeadline` drops a QUEUED waiter from the queue and rejects
+   * it WITHOUT ever invoking `fn` (see concurrency-gate), so an expiry here
+   * cannot leak a waiter that later wakes and fires a request nobody awaits.
+   * The signal is chained from the caller's, so an unmount still cancels
+   * normally at either stage.
+   *
+   * Deliberately NOT reported as `reportSyncUnreachable`: exhausting our OWN
+   * in-process slots says nothing about whether the origin is up, and flipping
+   * the whole app offline for local back-pressure would be a false alarm.
+   */
+  const runGated = async (
+    name: string,
+    args: unknown,
+    delta: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<QueryResult> => {
+    const queueDeadline = new AbortController();
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onCallerAbort = (): void => queueDeadline.abort();
+    if (signal) {
+      if (signal.aborted) queueDeadline.abort();
+      else signal.addEventListener('abort', onCallerAbort, { once: true });
+    }
+    // RACED for the same reason sendOne races: a rejection we control is the
+    // only way to guarantee this settles regardless of how the gate or the
+    // transport behaves.
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        expired = true;
+        queueDeadline.abort();
+        reject(
+          new Error(
+            `sync query "${name}" timed out after ${requestTimeoutMs}ms waiting for a request slot`,
+          ),
+        );
+      }, requestTimeoutMs);
+    });
+    try {
+      const running = gate.run(() => sendOne(name, args, delta, queueDeadline.signal), queueDeadline.signal);
+      // The loser of the race can still reject later; swallow it so it is not
+      // an unhandled rejection.
+      running.catch(() => {});
+      return await Promise.race([running, expiry]);
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onCallerAbort);
+    }
+  };
+
   // Delta-aware wrapper. No codec (the default) or a non-opted-in query → a
   // plain request with NO `delta` param. For a delta query: send the cursor
   // ('' cold), decode into full rows, and on a checksum mismatch / missing base
@@ -305,14 +374,14 @@ export function getQueryFetcher(
   const fetchQuery: QueryFetch = async (name, args, opts) => {
     const signal = opts?.signal;
     const codec = getSyncDeltaCodec();
-    if (!codec?.enabled(name)) return gate.run(() => sendOne(name, args, undefined, signal), signal);
+    if (!codec?.enabled(name)) return runGated(name, args, undefined, signal);
 
     const viewKey = codec.viewKey(name, args);
     const cursor = codec.cursorFor(viewKey);
-    const raw = await gate.run(() => sendOne(name, args, cursor ?? '', signal), signal);
+    const raw = await runGated(name, args, cursor ?? '', signal);
     const dec = codec.decodeResult(viewKey, raw);
     if (dec.refetchFull && cursor !== undefined) {
-      const full = await gate.run(() => sendOne(name, args, '', signal), signal);
+      const full = await runGated(name, args, '', signal);
       const dec2 = codec.decodeResult(viewKey, full);
       return { rows: dec2.rows, version: full.version };
     }
