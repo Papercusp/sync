@@ -321,10 +321,29 @@ export function installSyncMetricsGlobal(): void {
   if (w.__sync_metrics__) return;
   w.__sync_metrics__ = {
     snapshot: () => syncMetrics.snapshot(),
+    /** Every query this page has issued (bounded ring) — the hydration wave. */
+    queries: () => syncMetrics.recentQueries(),
     // Convenience: pretty-print to console.
     log: () => {
       // eslint-disable-next-line no-console
       console.table(syncMetrics.snapshot());
+    },
+    /** Per-queryName cost table, heaviest first — the P-002 view, live. */
+    logQueries: () => {
+      const { byQuery } = syncMetrics.snapshot();
+      const rows = Object.entries(byQuery)
+        .map(([name, s]) => ({
+          name,
+          requests: s.requests,
+          kb: Math.round(s.bytes / 1024),
+          avgMs: s.requests ? Math.round(s.requestMsTotal / s.requests) : 0,
+          maxMs: Math.round(s.requestMsMax),
+          waitMs: Math.round(s.waitMsTotal),
+          failures: s.failures,
+        }))
+        .sort((a, b) => b.kb - a.kb);
+      // eslint-disable-next-line no-console
+      console.table(rows);
     },
   };
 }

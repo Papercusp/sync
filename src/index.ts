@@ -35,8 +35,15 @@ export {
 } from './transports/polling/query-fetcher';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
-export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';
-export type { SyncMetricsSnapshot } from './observability/metrics';
+export { syncMetrics, installSyncMetricsGlobal, SYNC_QUERY_RING_SIZE } from './observability/metrics';
+export type {
+  SyncMetricsSnapshot,
+  SyncQueryEvent,
+  SyncQueryOutcome,
+  SyncQueryStat,
+  SyncTransportSnapshot,
+  GateProbe,
+} from './observability/metrics';
 export { configureQueryHealth } from './observability/query-health';
 export type { QueryHealthConfig } from './observability/query-health';
 

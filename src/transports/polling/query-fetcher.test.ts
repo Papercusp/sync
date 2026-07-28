@@ -41,7 +41,20 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
-const okResponse = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+/**
+ * A success fake. `text()` is what the fetcher actually calls (it needs the
+ * payload SIZE, which no header carries over the desktop IPC transport, and
+ * `json()` decodes to a string internally anyway) — the real polyfill returns a
+ * genuine `new Response`, so a fake that only implements `json()` is weaker
+ * than every production transport. `json()` is kept so the fake stays a
+ * drop-in for any test that reads it directly.
+ */
+const okResponse = (body: unknown) => ({
+  ok: true,
+  status: 200,
+  text: async () => JSON.stringify(body),
+  json: async () => body,
+});
 
 /** Query names in each request, in call order. */
 const namesOf = (mockFetch: ReturnType<typeof vi.fn>): string[] =>

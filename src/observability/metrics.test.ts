@@ -5,7 +5,7 @@
  * Run with: npx vitest run libs/generic/sync/src/observability/metrics.test.ts
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { syncMetrics, installSyncMetricsGlobal } from './metrics';
+import { syncMetrics, installSyncMetricsGlobal, SYNC_QUERY_RING_SIZE } from './metrics';
 
 beforeEach(() => syncMetrics.__resetForTests());
 
@@ -59,6 +59,99 @@ describe('syncMetrics counters', () => {
     expect(s.sse.eventsReceived).toBe(0);
     expect(s.sse.bytesReceived).toBe(0);
     expect(s.cache.hits).toBe(0);
+  });
+});
+
+describe('transport metrics (P-003b — the gate depth nothing outside tests read)', () => {
+  const ev = (over: Partial<Parameters<typeof syncMetrics.queryCompleted>[0]> = {}) => ({
+    name: 'plans.list',
+    startedAtMs: 0,
+    waitMs: 0,
+    requestMs: 10,
+    bytes: 1000,
+    outcome: 'ok' as const,
+    ...over,
+  });
+
+  it('reports the gate depth LIVE through a registered probe', () => {
+    let depth = { inFlight: 3, queued: 7, limit: 24 };
+    syncMetrics.registerGateProbe(() => depth);
+    expect(syncMetrics.snapshot().transport).toMatchObject({ inFlight: 3, queued: 7, limit: 24 });
+    depth = { inFlight: 0, queued: 0, limit: 24 };
+    // The point of a probe over a copied counter: the SECOND read must see the
+    // gate as it is now, not as it was when the probe was registered.
+    expect(syncMetrics.snapshot().transport).toMatchObject({ inFlight: 0, queued: 0 });
+  });
+
+  it('reports nulls — not zeros — when no gate is registered', () => {
+    const t = syncMetrics.snapshot().transport;
+    // "no gate" and "an idle gate" are different facts; zero would assert the latter.
+    expect(t.inFlight).toBeNull();
+    expect(t.queued).toBeNull();
+    expect(t.limit).toBeNull();
+  });
+
+  it('survives a probe that throws rather than breaking the snapshot', () => {
+    syncMetrics.registerGateProbe(() => {
+      throw new Error('gate exploded');
+    });
+    expect(syncMetrics.snapshot().transport.inFlight).toBeNull();
+  });
+
+  it('accumulates queue-wait tail counters, which is where a waiting user shows up', () => {
+    syncMetrics.queryCompleted(ev({ waitMs: 10 }));
+    syncMetrics.queryCompleted(ev({ waitMs: 300 }));
+    syncMetrics.queryCompleted(ev({ waitMs: 4000 }));
+    const t = syncMetrics.snapshot().transport;
+    expect(t.requests).toBe(3);
+    expect(t.queueWaitMsTotal).toBe(4310);
+    expect(t.queueWaitMsMax).toBe(4000);
+    expect(t.queueWaitOver250).toBe(2);
+    expect(t.queueWaitOver1000).toBe(1);
+  });
+
+  it('counts a timeout as both a failure and a timeout, and ignores unknown byte counts', () => {
+    syncMetrics.queryCompleted(ev({ outcome: 'timeout', bytes: -1 }));
+    syncMetrics.queryCompleted(ev({ outcome: 'error', bytes: -1 }));
+    const t = syncMetrics.snapshot().transport;
+    expect(t.failures).toBe(2);
+    expect(t.timeouts).toBe(1);
+    expect(t.bytesReceived).toBe(0); // -1 means "not observed", never subtracted
+  });
+
+  it('rolls up per queryName so payload weight is attributable', () => {
+    syncMetrics.queryCompleted(ev({ name: 'plans.list', bytes: 800_000, requestMs: 40 }));
+    syncMetrics.queryCompleted(ev({ name: 'plans.list', bytes: 800_000, requestMs: 90 }));
+    syncMetrics.queryCompleted(ev({ name: 'toastLog.recent', bytes: 2_000, requestMs: 5 }));
+    const { byQuery } = syncMetrics.snapshot();
+    expect(byQuery['plans.list']).toMatchObject({ requests: 2, bytes: 1_600_000, requestMsMax: 90 });
+    expect(byQuery['toastLog.recent']).toMatchObject({ requests: 1, bytes: 2_000 });
+  });
+
+  it('keeps a bounded ring of recent queries — the hydration wave, without an external recorder', () => {
+    for (let i = 0; i < SYNC_QUERY_RING_SIZE + 25; i++) {
+      syncMetrics.queryCompleted(ev({ name: `q${i}` }));
+    }
+    const recent = syncMetrics.recentQueries();
+    expect(recent).toHaveLength(SYNC_QUERY_RING_SIZE);
+    // Oldest dropped first, so the ring holds the MOST RECENT window.
+    expect(recent[0].name).toBe('q25');
+    expect(recent[recent.length - 1].name).toBe(`q${SYNC_QUERY_RING_SIZE + 24}`);
+    // A copy: sorting the caller's view must not reorder the ring itself.
+    recent.reverse();
+    expect(syncMetrics.recentQueries()[0].name).toBe('q25');
+  });
+
+  it('__resetForTests clears transport state and unregisters the probe', () => {
+    syncMetrics.registerGateProbe(() => ({ inFlight: 1, queued: 2, limit: 3 }));
+    syncMetrics.queryCompleted(ev({ waitMs: 500 }));
+    syncMetrics.__resetForTests();
+    const s = syncMetrics.snapshot();
+    expect(s.transport.requests).toBe(0);
+    expect(s.transport.queueWaitOver250).toBe(0);
+    expect(s.transport.inFlight).toBeNull();
+    expect(s.byQuery).toEqual({});
+    expect(syncMetrics.recentQueries()).toEqual([]);
   });
 });
 

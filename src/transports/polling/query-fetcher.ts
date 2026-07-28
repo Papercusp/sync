@@ -36,7 +36,21 @@
  */
 import { reportSyncReachable, reportSyncStaleOperator, reportSyncUnreachable } from '../../connectivity';
 import { getSyncDeltaCodec, type SyncDeltaMeta } from '../../delta-codec';
+import { syncMetrics, type SyncQueryOutcome } from '../../observability/metrics';
 import { createConcurrencyGate, type ConcurrencyGate } from './concurrency-gate';
+
+/** Monotonic-ish clock; `performance` is absent in some non-browser test hosts. */
+const nowMs = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/**
+ * Per-request scratch filled by `sendOne` so the gated wrapper can attribute
+ * time correctly: without `sentAtMs` there is no way to separate the QUEUE WAIT
+ * from the request, and the queue wait is the half that was invisible.
+ */
+interface RequestMeta {
+  sentAtMs: number | null;
+  bytes: number;
+}
 
 export interface QueryResult {
   rows: unknown[];
@@ -200,12 +214,23 @@ export function getQueryFetcher(
   }
 
   const gate = createConcurrencyGate(maxInFlight);
+  // P-003(b): publish the gate's LIVE depth. `inFlight`/`queued` have been on
+  // the gate interface since it was written and nothing outside tests ever read
+  // them, so a saturated gate — the exact condition that makes a user wait —
+  // was unobservable from the running app. One probe fixes that for every
+  // surface at once (window.__sync_metrics__, and anything that renders it).
+  syncMetrics.registerGateProbe(() => ({
+    inFlight: gate.inFlight,
+    queued: gate.queued,
+    limit: gate.limit,
+  }));
 
   const sendOne = async (
     name: string,
     args: unknown,
     delta: string | undefined,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    meta: RequestMeta,
   ): Promise<QueryResult> => {
     const params = new URLSearchParams({ name, args: JSON.stringify(args ?? {}) });
     // Only a delta-opted query carries `delta`; absent → the server's full path,
@@ -244,6 +269,7 @@ export function getQueryFetcher(
     try {
       let res: Response;
       try {
+        meta.sentAtMs = nowMs();
         const inFlight = fetch(`${restEndpoint}/rest-query?${params.toString()}`, { signal: deadline.signal });
         // If the race is won by the deadline, the loser can still reject later;
         // swallow that so it is not an unhandled rejection.
@@ -277,7 +303,14 @@ export function getQueryFetcher(
         if (unknownQueryName) reportSyncStaleOperator(name);
         throw new Error(message);
       }
-      const json = (await res.json()) as {
+      // text-then-parse rather than res.json(): `json()` decodes to a string
+      // internally anyway, so this costs nothing extra and is the only way to
+      // learn the payload SIZE over a transport that carries no content-length
+      // (the desktop IPC polyfill does not). Payload weight is half of what
+      // P-002 had to measure; measuring it from outside the app was the hard way.
+      const text = await res.text();
+      meta.bytes = text.length;
+      const json = (text ? JSON.parse(text) : {}) as {
         rows?: unknown[];
         changes?: unknown[];
         version?: string;
@@ -354,15 +387,38 @@ export function getQueryFetcher(
         );
       }, requestTimeoutMs);
     });
+    const startedAtMs = nowMs();
+    const meta: RequestMeta = { sentAtMs: null, bytes: -1 };
+    let outcome: SyncQueryOutcome = 'ok';
     try {
-      const running = gate.run(() => sendOne(name, args, delta, queueDeadline.signal), queueDeadline.signal);
+      const running = gate.run(
+        () => sendOne(name, args, delta, queueDeadline.signal, meta),
+        queueDeadline.signal,
+      );
       // The loser of the race can still reject later; swallow it so it is not
       // an unhandled rejection.
       running.catch(() => {});
       return await Promise.race([running, expiry]);
+    } catch (e) {
+      outcome = expired ? 'timeout' : isAbortError(e, signal) ? 'aborted' : 'error';
+      throw e;
     } finally {
       clearTimeout(timer);
       if (signal) signal.removeEventListener('abort', onCallerAbort);
+      // Recorded for EVERY outcome, including the ones that never reached the
+      // wire: a request that spent 9s queued and then timed out is precisely the
+      // event this instrumentation exists to make visible, and it has no
+      // `sentAtMs` — so the whole elapsed time is queue wait, not a lost sample.
+      const endedAtMs = nowMs();
+      const sentAtMs = meta.sentAtMs ?? endedAtMs;
+      syncMetrics.queryCompleted({
+        name,
+        startedAtMs,
+        waitMs: sentAtMs - startedAtMs,
+        requestMs: meta.sentAtMs === null ? 0 : endedAtMs - meta.sentAtMs,
+        bytes: meta.bytes,
+        outcome,
+      });
     }
   };
 
