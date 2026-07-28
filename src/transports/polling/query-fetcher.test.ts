@@ -404,6 +404,55 @@ describe('getQueryFetcher — per-request deadline (WI-6559)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  // WI-6559, SECOND HALF — the gap the two tests above cannot see, because both
+  // issue their calls SEQUENTIALLY and therefore never occupy the QUEUED
+  // position at all.
+  //
+  // `gate.run` is `await acquire()` and THEN `fn()`; the request deadline is
+  // armed inside `fn`. So it bounds the request but NOT the wait to be allowed
+  // to make one. Every holder does eventually time out and free its slot, so a
+  // queued caller is not stuck forever — it is stuck for one full deadline PER
+  // CALLER AHEAD OF IT. Latency therefore STACKS with queue depth (Nx the
+  // deadline) with nothing bounding the total, and blows straight past the
+  // caller's own ceiling.
+  //
+  // That is the live cold-page failure: the desktop's startup query wave
+  // saturates the gate, `rubrics.list` queues, and `ChatActionBar`'s 30s
+  // PARAMS_TIMEOUT_MS fires first — the owner's verbatim "click Grade, wait
+  // 30s, get an error", while a warm page answered the same click in 250ms
+  // because a react-query cache hit never touched the gate.
+  //
+  // Asserted on the MESSAGE, not on elapsed time: a queued caller settles on
+  // its own clock and can therefore never have entered `sendOne`, which is the
+  // property under test, and it holds without a timing margin that CI jitter
+  // could flake. This BITES — before the total deadline the queued callers
+  // eventually acquired a freed slot and rejected with the in-flight
+  // "timed out after" message instead, having waited 2-3x as long.
+  it('bounds the QUEUE WAIT too, so a queued caller cannot stack behind other callers deadlines', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(hangsIgnoringAbort));
+    // Limit 1 makes every caller after the first a QUEUED one.
+    const fetcher = getQueryFetcher(ep(), undefined, 1, 25);
+
+    const started = Date.now();
+    const settled = await Promise.allSettled([
+      fetcher('holds.the.slot', {}),
+      fetcher('queued.behind.it', {}),
+      fetcher('queued.deeper', {}),
+    ]);
+    const elapsed = Date.now() - started;
+
+    expect(settled.every((r) => r.status === 'rejected')).toBe(true);
+    const reasons = settled.map((r) =>
+      r.status === 'rejected' ? String((r.reason as Error).message) : '',
+    );
+    // The two QUEUED callers never reach the transport, so they must report the
+    // wait — not a request timeout they never got far enough to incur.
+    const queuedOut = reasons.filter((m) => /waiting for a request slot/.test(m));
+    expect(queuedOut.length).toBeGreaterThanOrEqual(2);
+    // Secondary, deliberately loose: stacking would need ~3 full deadlines.
+    expect(elapsed).toBeLessThan(25 * 3);
+  });
+
   it('does not fire on a request that completes inside the deadline', async () => {
     // Non-vacuity: a deadline that rejected everything would pass both tests
     // above and break the whole sync layer.
