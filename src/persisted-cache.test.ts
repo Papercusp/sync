@@ -195,6 +195,93 @@ describe('persisted sync cache', () => {
     expect(target.getQueryData(['sync', 'late', {}])).toEqual({ rows: ['tail'] });
   });
 
+  // ---------------------------------------------------------------- WI-6502
+  // Recurrence guards for the owner-reported typing lag. The persister ran a
+  // full dehydrate + replacer-stringify of a 3236KB cache on EVERY cache event
+  // (~1/s) — ~36ms of main-thread block that keystrokes then queued behind —
+  // and, because every write threw QuotaExceededError and the catch reset the
+  // dedup key, it persisted nothing at all while doing it. Each test below
+  // fails if one of those three defects returns.
+
+  it('does not re-serialize when a cache event changes no persistable data', () => {
+    const storage = memoryStorage();
+    const client = track(new QueryClient());
+    // Count the work: stringify is the expensive step the flush used to pay
+    // unconditionally, so spy on it rather than on the (deduped) write.
+    const stop = startSyncCachePersistence({ client, storage });
+    client.setQueryData(['sync', 'q', {}], { rows: [1] });
+    vi.advanceTimersByTime(1000);
+    expect(storage.map.has(KEY)).toBe(true);
+
+    // Non-vacuity check FIRST: a real data change must still serialize, so a
+    // zero below means "the gate short-circuited", not "the flush never ran".
+    const spy = vi.spyOn(JSON, 'stringify');
+    client.setQueryData(['sync', 'q', {}], { rows: [1, 2] });
+    vi.advanceTimersByTime(1000);
+    const whenDataChanged = spy.mock.calls.length;
+
+    spy.mockClear();
+    // A cache event that touches no persistable DATA: an invalidate marks the
+    // query stale and notifies subscribers, but dataUpdatedAt does not move.
+    client.invalidateQueries({ queryKey: ['sync', 'q', {}] });
+    vi.advanceTimersByTime(1000);
+    const whenNothingChanged = spy.mock.calls.length;
+    spy.mockRestore();
+    stop();
+
+    expect(whenDataChanged).toBeGreaterThan(0); // the flush path is live
+    expect(whenNothingChanged).toBe(0); // ...and the gate short-circuits before serializing
+  });
+
+  it('still writes when data actually changes (the gate is not just "never flush")', () => {
+    const storage = memoryStorage();
+    const client = track(new QueryClient());
+    const stop = startSyncCachePersistence({ client, storage });
+    client.setQueryData(['sync', 'q', {}], { rows: [1] });
+    vi.advanceTimersByTime(1000);
+    client.setQueryData(['sync', 'q', {}], { rows: [1, 2] });
+    vi.advanceTimersByTime(1000);
+    stop();
+    const target = track(new QueryClient());
+    restorePersistedSyncCache({ client: target, storage });
+    expect(target.getQueryData(['sync', 'q', {}])).toEqual({ rows: [1, 2] });
+  });
+
+  it('gives up after repeated write failures instead of retrying every cache event', () => {
+    const map = new Map<string, string>();
+    let attempts = 0;
+    const failing: SyncCacheStorage = {
+      getItem: (k) => map.get(k) ?? null,
+      setItem: () => {
+        attempts += 1;
+        throw new Error('QuotaExceededError');
+      },
+      removeItem: (k) => void map.delete(k),
+    };
+    const client = track(new QueryClient());
+    const stop = startSyncCachePersistence({ client, storage: failing });
+    for (let i = 0; i < 12; i++) {
+      client.setQueryData(['sync', 'q', {}], { rows: Array.from({ length: i + 1 }, (_, n) => n) });
+      vi.advanceTimersByTime(1000);
+    }
+    stop();
+    // Before the fix the catch reset the dedup key, so all 12 data changes
+    // re-serialized and re-attempted the write, forever.
+    expect(attempts).toBeLessThanOrEqual(3);
+  });
+
+  it('measures the size budget in BYTES, not UTF-16 code units', () => {
+    const storage = memoryStorage();
+    const client = track(new QueryClient());
+    // ~1200 chars of payload => ~2400 bytes. A 2000-BYTE budget must reject it;
+    // the old `.length > maxBytes` comparison would have accepted it.
+    const stop = startSyncCachePersistence({ client, storage, maxBytes: 2000 });
+    client.setQueryData(['sync', 'big', {}], { rows: ['x'.repeat(1200)] });
+    vi.advanceTimersByTime(1000);
+    stop();
+    expect(storage.map.has(KEY)).toBe(false);
+  });
+
   it('returns false with no storage available (SSR / storage-disabled webview)', () => {
     const target = track(new QueryClient());
     // jsdom HAS localStorage; force the no-storage path via an explicit null-ish seam.
