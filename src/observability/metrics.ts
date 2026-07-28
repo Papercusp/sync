@@ -14,6 +14,60 @@
  * timer and computes deltas.
  */
 
+/** One completed (or failed) query request, as kept in the bounded recent-ring. */
+export interface SyncQueryEvent {
+  /** Query name, e.g. `plans.list`. */
+  name: string;
+  /** performance.now() at the moment the caller asked — BEFORE the gate. */
+  startedAtMs: number;
+  /** ms spent QUEUED behind the concurrency gate before the request was sent. */
+  waitMs: number;
+  /** ms from request sent to body fully read. */
+  requestMs: number;
+  /** Response body length in chars (≈bytes for JSON), or -1 when not observed. */
+  bytes: number;
+  /** 'ok' | 'error' | 'timeout' | 'aborted'. */
+  outcome: SyncQueryOutcome;
+}
+
+export type SyncQueryOutcome = 'ok' | 'error' | 'timeout' | 'aborted';
+
+/** Per-queryName rollup — the "which query costs what" view. */
+export interface SyncQueryStat {
+  requests: number;
+  bytes: number;
+  waitMsTotal: number;
+  requestMsTotal: number;
+  requestMsMax: number;
+  failures: number;
+}
+
+/**
+ * Transport-layer health. `inFlight` / `queued` / `limit` are LIVE reads of the
+ * concurrency gate via a registered probe — they existed on the gate interface
+ * from the start and nothing outside tests ever read them, which is exactly how
+ * a saturated gate stayed invisible while users waited (WI-6559, and P-003 of
+ * no-http-anywhere-2026-07-28). The counters beside them are cumulative since
+ * page load.
+ */
+export interface SyncTransportSnapshot {
+  /** Requests currently occupying a gate slot, or null when no gate is registered. */
+  inFlight: number | null;
+  /** Callers QUEUED for a slot — the number that is nonzero while the user waits. */
+  queued: number | null;
+  /** The gate's current cap. */
+  limit: number | null;
+  requests: number;
+  failures: number;
+  timeouts: number;
+  bytesReceived: number;
+  /** Cumulative queue wait, and the tail that matters for "the user is waiting". */
+  queueWaitMsTotal: number;
+  queueWaitMsMax: number;
+  queueWaitOver250: number;
+  queueWaitOver1000: number;
+}
+
 export interface SyncMetricsSnapshot {
   /** ms since process start (performance.now-based) when this snapshot was taken. */
   takenAtMs: number;
@@ -44,7 +98,21 @@ export interface SyncMetricsSnapshot {
     /** Invalidations triggered explicitly via the result.invalidate() callback. */
     fromManual: number;
   };
+  transport: SyncTransportSnapshot;
+  /** Per-queryName rollup, keyed by query name. */
+  byQuery: Record<string, SyncQueryStat>;
 }
+
+/** Live gate reader, registered by the transport that owns the gate. */
+export type GateProbe = () => { inFlight: number; queued: number; limit: number };
+
+/**
+ * How many recent query events to keep. Sized to comfortably hold a cold page's
+ * whole hydration wave (measured at 87 distinct keys on the operator's densest
+ * route, 2026-07-28 / P-002) so `recentQueries()` answers "what did first paint
+ * actually fetch" without an external recorder.
+ */
+export const SYNC_QUERY_RING_SIZE = 400;
 
 interface MetricsState {
   sse: {
@@ -56,7 +124,32 @@ interface MetricsState {
   };
   cache: { hits: number; misses: number };
   invalidations: { fromSse: number; fromTimer: number; fromManual: number };
+  transport: {
+    requests: number;
+    failures: number;
+    timeouts: number;
+    bytesReceived: number;
+    queueWaitMsTotal: number;
+    queueWaitMsMax: number;
+    queueWaitOver250: number;
+    queueWaitOver1000: number;
+  };
+  byQuery: Map<string, SyncQueryStat>;
+  /** Bounded ring of recent query events (oldest dropped first). */
+  recent: SyncQueryEvent[];
+  gateProbe: GateProbe | null;
 }
+
+const freshTransport = (): MetricsState['transport'] => ({
+  requests: 0,
+  failures: 0,
+  timeouts: 0,
+  bytesReceived: 0,
+  queueWaitMsTotal: 0,
+  queueWaitMsMax: 0,
+  queueWaitOver250: 0,
+  queueWaitOver1000: 0,
+});
 
 const state: MetricsState = {
   sse: {
@@ -68,6 +161,10 @@ const state: MetricsState = {
   },
   cache: { hits: 0, misses: 0 },
   invalidations: { fromSse: 0, fromTimer: 0, fromManual: 0 },
+  transport: freshTransport(),
+  byQuery: new Map(),
+  recent: [],
+  gateProbe: null,
 };
 
 const now = (): number =>
@@ -112,10 +209,74 @@ export const syncMetrics = {
   invalidateFromManual(): void {
     state.invalidations.fromManual++;
   },
+  /**
+   * Register the live gate reader. Idempotent by replacement — the transport
+   * owns exactly one gate per endpoint and re-registers on retune. Passing null
+   * unregisters (the snapshot then reports nulls rather than stale numbers,
+   * because "no gate" and "an idle gate" are different facts).
+   */
+  registerGateProbe(probe: GateProbe | null): void {
+    state.gateProbe = probe;
+  },
+  /**
+   * Record one completed query request. Called from the transport's gated path
+   * so `waitMs` is the REAL queue wait — the interval the user spends waiting
+   * for permission to make a request, which no previous counter exposed.
+   */
+  queryCompleted(ev: SyncQueryEvent): void {
+    const t = state.transport;
+    t.requests++;
+    if (ev.outcome === 'error') t.failures++;
+    if (ev.outcome === 'timeout') {
+      t.failures++;
+      t.timeouts++;
+    }
+    if (ev.bytes > 0) t.bytesReceived += ev.bytes;
+    t.queueWaitMsTotal += ev.waitMs;
+    if (ev.waitMs > t.queueWaitMsMax) t.queueWaitMsMax = ev.waitMs;
+    if (ev.waitMs > 250) t.queueWaitOver250++;
+    if (ev.waitMs > 1000) t.queueWaitOver1000++;
+
+    let stat = state.byQuery.get(ev.name);
+    if (!stat) {
+      stat = { requests: 0, bytes: 0, waitMsTotal: 0, requestMsTotal: 0, requestMsMax: 0, failures: 0 };
+      state.byQuery.set(ev.name, stat);
+    }
+    stat.requests++;
+    if (ev.bytes > 0) stat.bytes += ev.bytes;
+    stat.waitMsTotal += ev.waitMs;
+    stat.requestMsTotal += ev.requestMs;
+    if (ev.requestMs > stat.requestMsMax) stat.requestMsMax = ev.requestMs;
+    if (ev.outcome === 'error' || ev.outcome === 'timeout') stat.failures++;
+
+    state.recent.push(ev);
+    if (state.recent.length > SYNC_QUERY_RING_SIZE) state.recent.shift();
+  },
+  /** The bounded recent-query ring, oldest first. A copy — callers may sort it. */
+  recentQueries(): SyncQueryEvent[] {
+    return state.recent.slice();
+  },
   // Snapshot for inspection / future POST
   snapshot(): SyncMetricsSnapshot {
+    const gate = state.gateProbe;
+    let live: { inFlight: number; queued: number; limit: number } | null = null;
+    try {
+      live = gate ? gate() : null;
+    } catch {
+      // A throwing probe must never break the snapshot — report unknown instead.
+      live = null;
+    }
+    const byQuery: Record<string, SyncQueryStat> = {};
+    for (const [name, stat] of state.byQuery) byQuery[name] = { ...stat };
     return {
       takenAtMs: now(),
+      transport: {
+        inFlight: live ? live.inFlight : null,
+        queued: live ? live.queued : null,
+        limit: live ? live.limit : null,
+        ...state.transport,
+      },
+      byQuery,
       sse: {
         connectedSinceMs:
           state.sse.connectedAt !== null ? now() - state.sse.connectedAt : null,
@@ -140,6 +301,10 @@ export const syncMetrics = {
     state.invalidations.fromSse = 0;
     state.invalidations.fromTimer = 0;
     state.invalidations.fromManual = 0;
+    state.transport = freshTransport();
+    state.byQuery.clear();
+    state.recent.length = 0;
+    state.gateProbe = null;
   },
 };
 
