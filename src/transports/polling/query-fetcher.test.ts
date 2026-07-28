@@ -241,12 +241,34 @@ describe('getQueryFetcher — head-of-line guard (P-008b)', () => {
 });
 
 describe('getQueryFetcher — cancellation (P-008c)', () => {
-  it('passes the AbortSignal through to fetch', async () => {
-    const mockFetch = vi.fn().mockResolvedValue(okResponse({ rows: [], version: 'v' }));
+  it("propagates the caller's abort to the signal fetch receives", async () => {
+    // Asserts the BEHAVIOUR, not the identity. fetch no longer receives the
+    // caller's signal object itself: WI-6559 added a per-request deadline, so
+    // what fetch gets is a controller chaining the caller's signal AND the
+    // timeout. Identity was never the contract — "an unmount cancels the
+    // in-flight request" is, and that is what this checks.
+    // Asserted while the request is still IN FLIGHT — once it settles, the
+    // deadline's `finally` unsubscribes from the caller's signal (it must, or
+    // every completed request would leak a listener), so a post-completion abort
+    // correctly propagates nothing.
+    const hold = deferred();
+    const mockFetch = vi.fn().mockImplementation(async () => {
+      await hold.promise;
+      return okResponse({ rows: [], version: 'v' });
+    });
     vi.stubGlobal('fetch', mockFetch);
     const ac = new AbortController();
-    await getQueryFetcher(ep())('q', {}, { signal: ac.signal });
-    expect((mockFetch.mock.calls[0][1] as { signal?: AbortSignal }).signal).toBe(ac.signal);
+    const pending = getQueryFetcher(ep())('q', {}, { signal: ac.signal });
+    await Promise.resolve();
+
+    const seen = (mockFetch.mock.calls[0][1] as { signal?: AbortSignal }).signal;
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(false);
+    ac.abort();
+    expect(seen!.aborted).toBe(true);
+
+    hold.resolve();
+    await pending.catch(() => {});
   });
 
   it('a query aborted while QUEUED never reaches the network', async () => {
@@ -341,5 +363,60 @@ describe('getQueryFetcher — rows-delta (P-006 codec)', () => {
     const r = await getQueryFetcher(ep())('plans.list', {});
     expect(r.rows).toEqual([{ id: 'fresh' }]);
     expect(call).toBe(2);
+  });
+});
+
+describe('getQueryFetcher — per-request deadline (WI-6559)', () => {
+  // THE DEFECT THIS GUARDS. `gate.run` releases its slot in a `finally`, so the
+  // slot is held for exactly as long as the request stays pending. A transport
+  // that never settles therefore owns a slot forever; with the gate full of
+  // those, `acquire()` queues every later caller behind waiters that can never
+  // drain, so the request function is never invoked — nothing is sent, nothing
+  // is logged, and the caller's promise neither resolves NOR rejects. Live, that
+  // read as: click Grade, wait 30s, get "could not load its options in time",
+  // while queries that resolved earlier in the same instance looked healthy.
+  //
+  // The mock deliberately IGNORES the abort signal. That is the whole point: the
+  // hanging transport in production is the desktop's IPC-polyfilled `fetch`, and
+  // an abort-only deadline would depend on the very thing we cannot assume. A
+  // signal-honouring mock would pass against a fix that does not actually work.
+  const hangsIgnoringAbort = () => new Promise<never>(() => {});
+
+  it('rejects a hung request on the deadline instead of hanging forever', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(hangsIgnoringAbort));
+    const fetcher = getQueryFetcher(ep(), undefined, 4, 25);
+    await expect(fetcher('hangs.forever', {})).rejects.toThrow(/timed out after 25ms/);
+  });
+
+  it('frees the gate slot a hung request held, so a later caller still runs', async () => {
+    // The load-bearing assertion. Rejecting the caller is not the fix by itself —
+    // releasing the SLOT is. Gate limit 1 makes starvation total: if the hung
+    // request keeps its slot, the second call can never be invoked at all.
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(hangsIgnoringAbort)
+      .mockImplementation(async () => okResponse({ rows: ['after'], version: 'v' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const fetcher = getQueryFetcher(ep(), undefined, 1, 25);
+    await expect(fetcher('hangs.forever', {})).rejects.toThrow(/timed out/);
+    await expect(fetcher('runs.after', {})).resolves.toMatchObject({ rows: ['after'] });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not fire on a request that completes inside the deadline', async () => {
+    // Non-vacuity: a deadline that rejected everything would pass both tests
+    // above and break the whole sync layer.
+    const slow = deferred();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => {
+        await slow.promise;
+        return okResponse({ rows: ['in-time'], version: 'v' });
+      }),
+    );
+    const pending = getQueryFetcher(ep(), undefined, 4, 10_000)('slow.but.fine', {});
+    slow.resolve();
+    await expect(pending).resolves.toMatchObject({ rows: ['in-time'] });
   });
 });

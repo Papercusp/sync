@@ -219,10 +219,22 @@ export function getQueryFetcher(
     // caller's own signal is chained in, so an unmount still cancels normally.
     const deadline = new AbortController();
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      deadline.abort();
-    }, requestTimeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // RACED, not merely aborted. Aborting assumes the transport HONOURS
+    // `init.signal` — and the transport that actually hangs here is the desktop's
+    // IPC-polyfilled `window.fetch`, which is exactly the one we cannot assume
+    // that of. If it ignores the abort, an abort-only deadline leaves the promise
+    // pending and the gate slot held, i.e. it would not fix the bug at all. The
+    // race guarantees this function settles no matter how the transport behaves,
+    // which is the property the gate needs. The abort is still fired, so a
+    // well-behaved transport also releases its socket.
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        deadline.abort();
+        reject(new Error(`sync query "${name}" timed out after ${requestTimeoutMs}ms`));
+      }, requestTimeoutMs);
+    });
     const onCallerAbort = (): void => deadline.abort();
     if (signal) {
       if (signal.aborted) deadline.abort();
@@ -232,7 +244,11 @@ export function getQueryFetcher(
     try {
       let res: Response;
       try {
-        res = await fetch(`${restEndpoint}/rest-query?${params.toString()}`, { signal: deadline.signal });
+        const inFlight = fetch(`${restEndpoint}/rest-query?${params.toString()}`, { signal: deadline.signal });
+        // If the race is won by the deadline, the loser can still reject later;
+        // swallow that so it is not an unhandled rejection.
+        inFlight.catch(() => {});
+        res = await Promise.race([inFlight, expiry]);
       } catch (e) {
         // OUR deadline fired: this request is never coming back. Reject loudly
         // rather than leaving the caller to time out against a pending promise —
