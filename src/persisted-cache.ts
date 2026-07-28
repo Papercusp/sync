@@ -174,7 +174,7 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
       if (q.state.status !== 'success' || q.meta?.persist === false) continue;
       parts.push(q.queryHash, String(q.state.dataUpdatedAt));
     }
-    return parts.join('');
+    return parts.join('\u001f');
   };
 
   // WI-6502: the write failing must not mean "retry the whole serialize on the
