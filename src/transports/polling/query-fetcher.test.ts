@@ -466,6 +466,36 @@ describe('getQueryFetcher — per-request deadline (WI-6559)', () => {
     expect(elapsed).toBeLessThan(25 * 3);
   });
 
+  // WI-6569: the OTHER half of the message contract, and the one that cost two
+  // investigations. The expiry timer wraps `gate.run(...)` — acquire AND
+  // execute — so it fires both for a caller that never got a slot and for one
+  // that got a slot instantly and then hung in the transport. Reporting the
+  // second as "waiting for a request slot" is a false statement that points the
+  // reader at the gate, and it is why WI-6569 was filed against gate saturation
+  // that measurement later showed never happened (peak inFlight 11 of 24,
+  // `queued` never above 0, on two separate cold boots).
+  //
+  // Asserted on the MESSAGE for the same reason the test above is: the holder
+  // is distinguished by having ENTERED sendOne, not by elapsed time.
+  it('says the request hung — not that it waited for a slot — when the slot was granted', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(hangsIgnoringAbort));
+    // Limit 1 with a SINGLE caller: it is admitted immediately, so any timeout
+    // it reports is unambiguously an in-flight one.
+    const fetcher = getQueryFetcher(ep(), undefined, 1, 25);
+
+    const settled = await Promise.allSettled([fetcher('holds.the.slot', {})]);
+    expect(settled[0]!.status).toBe('rejected');
+    const message = String(
+      (settled[0] as PromiseRejectedResult).reason?.message ?? '',
+    );
+
+    // The regression: this caller held a slot the entire time.
+    expect(message).not.toMatch(/waiting for a request slot/);
+    // And it must say so in terms that redirect the reader off the gate.
+    expect(message).toMatch(/in flight/);
+    expect(message).toMatch(/gate was not the bottleneck/);
+  });
+
   it('does not fire on a request that completes inside the deadline', async () => {
     // Non-vacuity: a deadline that rejected everything would pass both tests
     // above and break the whole sync layer.

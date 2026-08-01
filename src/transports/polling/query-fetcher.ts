@@ -373,22 +373,38 @@ export function getQueryFetcher(
       if (signal.aborted) queueDeadline.abort();
       else signal.addEventListener('abort', onCallerAbort, { once: true });
     }
+    const startedAtMs = nowMs();
+    const meta: RequestMeta = { sentAtMs: null, bytes: -1 };
     // RACED for the same reason sendOne races: a rejection we control is the
     // only way to guarantee this settles regardless of how the gate or the
     // transport behaves.
+    //
+    // WI-6569: this timer wraps `gate.run(...)` — acquire AND execute — so it
+    // fires for two causally opposite failures, and reporting both as "waiting
+    // for a request slot" sent two separate investigations at the gate for a
+    // stall that was never in it. `meta.sentAtMs` is exactly the discriminator
+    // (null ⇒ sendOne never ran ⇒ never admitted), and the metrics path below
+    // already splits waitMs/requestMs on it; only this message did not. Say
+    // which deadline actually elapsed, and — when the slot WAS granted — how
+    // long each half took, so the next reader is pointed at the transport
+    // rather than at a gate that had capacity to spare the whole time.
     const expiry = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         expired = true;
         queueDeadline.abort();
+        const admittedAtMs = meta.sentAtMs;
         reject(
           new Error(
-            `sync query "${name}" timed out after ${requestTimeoutMs}ms waiting for a request slot`,
+            admittedAtMs === null
+              ? `sync query "${name}" timed out after ${requestTimeoutMs}ms waiting for a request slot`
+              : `sync query "${name}" timed out after ${requestTimeoutMs}ms in flight ` +
+                `(got a slot after ${Math.round(admittedAtMs - startedAtMs)}ms, then ` +
+                `${Math.round(nowMs() - admittedAtMs)}ms awaiting the response — the gate ` +
+                `was not the bottleneck)`,
           ),
         );
       }, requestTimeoutMs);
     });
-    const startedAtMs = nowMs();
-    const meta: RequestMeta = { sentAtMs: null, bytes: -1 };
     let outcome: SyncQueryOutcome = 'ok';
     try {
       const running = gate.run(
