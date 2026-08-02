@@ -200,3 +200,102 @@ describe('usePollingQuery — cancellation (drop-sync-batcher P-008c)', () => {
     await waitFor(() => expect(captured?.aborted).toBe(true));
   });
 });
+
+describe('usePollingQuery — persisted-cache opt-out (WI-6656)', () => {
+  it('stamps meta.persist:false for a query named in persistExcludeQueryNames', async () => {
+    const mockFetch = makeOkFetch({ rows: [1], version: 'v1' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const usePollingQuery = createUsePollingQuery({
+      restEndpoint: ep(),
+      defaultPollIntervalMs: 60_000,
+      persistExcludeQueryNames: ['plans.attention', 'advRoster.list'],
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children);
+
+    renderHook(() => usePollingQuery({ queryName: 'plans.attention', args: {} }), { wrapper });
+
+    await waitFor(() => {
+      const entry = qc.getQueryCache().find({ queryKey: ['sync', 'plans.attention', {}] });
+      expect(entry?.meta?.persist).toBe(false);
+    });
+  });
+
+  it('a query NOT named in persistExcludeQueryNames carries no persist meta (persists by default)', async () => {
+    const mockFetch = makeOkFetch({ rows: [1], version: 'v1' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const usePollingQuery = createUsePollingQuery({
+      restEndpoint: ep(),
+      defaultPollIntervalMs: 60_000,
+      persistExcludeQueryNames: ['plans.attention'],
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children);
+
+    renderHook(() => usePollingQuery({ queryName: 'work_items.list', args: {} }), { wrapper });
+
+    await waitFor(() => {
+      const entry = qc.getQueryCache().find({ queryKey: ['sync', 'work_items.list', {}] });
+      expect(entry).toBeDefined();
+    });
+    const entry = qc.getQueryCache().find({ queryKey: ['sync', 'work_items.list', {}] });
+    expect(entry?.meta?.persist).toBeUndefined();
+  });
+
+  it('a per-call persist:true overrides the provider-level name exclusion', async () => {
+    const mockFetch = makeOkFetch({ rows: [1], version: 'v1' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const usePollingQuery = createUsePollingQuery({
+      restEndpoint: ep(),
+      defaultPollIntervalMs: 60_000,
+      persistExcludeQueryNames: ['plans.attention'],
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children);
+
+    renderHook(
+      () => usePollingQuery({ queryName: 'plans.attention', args: {}, persist: true }),
+      { wrapper },
+    );
+
+    await waitFor(() => {
+      const entry = qc.getQueryCache().find({ queryKey: ['sync', 'plans.attention', {}] });
+      expect(entry).toBeDefined();
+    });
+    const entry = qc.getQueryCache().find({ queryKey: ['sync', 'plans.attention', {}] });
+    expect(entry?.meta?.persist).toBeUndefined();
+  });
+
+  it('a per-call persist:false excludes a query even with no provider-level list', async () => {
+    const mockFetch = makeOkFetch({ rows: [1], version: 'v1' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const usePollingQuery = createUsePollingQuery({
+      restEndpoint: ep(),
+      defaultPollIntervalMs: 60_000,
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children);
+
+    renderHook(
+      () => usePollingQuery({ queryName: 'q.secret', args: {}, persist: false }),
+      { wrapper },
+    );
+
+    await waitFor(() => {
+      const entry = qc.getQueryCache().find({ queryKey: ['sync', 'q.secret', {}] });
+      expect(entry?.meta?.persist).toBe(false);
+    });
+  });
+});
