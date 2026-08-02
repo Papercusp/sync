@@ -81,7 +81,32 @@ export function lazyWithRetry<T extends ComponentType<any>>(
   const retries = opts.retries ?? 5;
   const intervalMs = opts.intervalMs ?? 300;
   const maxIntervalMs = opts.maxIntervalMs ?? 3000;
-  const reloadOnFail = opts.reloadOnFail ?? process.env.NODE_ENV !== 'production';
+  // `vite build` pins `process.env.NODE_ENV` to 'production' regardless of
+  // `--mode`, and the bundler constant-folds that comparison at BUILD time —
+  // under the dev shell (`vite build --watch --mode development`) the old
+  // check therefore folded to a static `false` in every build, permanently
+  // defaulting `reloadOnFail` to off (WI-7002). `import.meta.env.MODE`
+  // correctly reflects `--mode` in every build and isn't subject to that
+  // pinning — it's already the repo's canonical dev/production predicate
+  // (see `apps/operator-vite/src/routes/__root.tsx`).
+  //
+  // Note: `shouldAutoReloadChunkFailure` also unconditionally returns false
+  // for `inTauriDesktop`, so this default was already inert on the packaged
+  // desktop regardless — this only changes behavior for a non-Tauri browser
+  // dev session (the retired standalone webapp path today; kept correct so
+  // the option is available to any future non-Tauri consumer).
+  //
+  // Read via a cast rather than declaring `ImportMetaEnv` globally: this is
+  // a domain-free "generic" lib (BORROWABLE.md) with no `vite/client` types
+  // dependency, and its source is typechecked as part of MULTIPLE consumer
+  // programs (this package's own tsconfig, plus operator-vite's, which DOES
+  // declare `vite/client`'s stricter non-optional `ImportMeta.env`) — a local
+  // global augmentation here would conflict with that declaration wherever
+  // both land in the same tsc program. `env?.MODE` degrades to `undefined`
+  // (treated as non-production, matching the old `process.env.NODE_ENV`
+  // default under plain Node) in any runtime that doesn't inject it.
+  const importMetaEnv = (import.meta as unknown as { env?: { MODE?: string } }).env;
+  const reloadOnFail = opts.reloadOnFail ?? importMetaEnv?.MODE !== 'production';
   const origin = typeof window !== 'undefined' ? window.location.origin : undefined;
   const inTauriDesktop =
     typeof window !== 'undefined'
