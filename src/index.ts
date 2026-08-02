@@ -17,6 +17,7 @@ export {
 } from './connectivity';
 export {
   lazyWithRetry,
+  configureLazyWithRetry,
   shouldAutoReloadChunkFailure,
   isChunkLoadError,
   CHUNK_LOAD_ERROR_RE,
