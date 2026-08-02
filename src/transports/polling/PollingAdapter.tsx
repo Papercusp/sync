@@ -18,6 +18,8 @@ interface PollingAdapterProps {
   tokenQueryParam?: string;
   /** Max sync requests in flight at once (default 24). See query-fetcher.ts. */
   maxInFlightFetches?: number;
+  /** Query names excluded from the host's persisted-cache snapshot (WI-6656). */
+  persistExcludeQueryNames?: readonly string[];
   onTransportError?: (error: Error) => void;
   /** Accepted (and ignored) so SyncProvider can spread one commonProps
    *  shape into both adapters. The polling transport doesn't need a Zero
@@ -50,14 +52,15 @@ export function PollingAdapter({
   pollIntervalMs = 10_000,
   tokenQueryParam,
   maxInFlightFetches,
+  persistExcludeQueryNames,
 }: PollingAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   warnIfDefaultUsedInProd(endpoint);
   const queryClient = getQueryClient();
 
   const useDataImpl = useMemo(
-    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches }),
-    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches],
+    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames }),
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames],
   );
 
   const prefetch = useMemo(

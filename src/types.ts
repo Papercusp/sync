@@ -98,6 +98,22 @@ export interface SyncProviderProps {
    * route writes through the per-call REST fallback in `useSyncMutate`.
    */
   mutators?: any;
+  /**
+   * Query names (exact `queryName` match, e.g. `'plans.attention'`) to
+   * exclude from the host app's persisted-cache snapshot by default —
+   * equivalent to every `useSyncQuery` call for that name implicitly getting
+   * `persist: false`, without having to annotate each call site (and without
+   * missing a future one). A per-call `persist: true` overrides this for
+   * that one site.
+   *
+   * Exists because `@papercusp/sync` is transport-agnostic and must not hold
+   * app-specific query names itself (WI-6656): the HOST APP is the one that
+   * knows which queries are its size outliers, so it passes the list here
+   * once, at the provider. Ignored unless the host also calls
+   * `enablePersistedSyncCache()` — this has no effect on the live in-memory
+   * cache, only on what a persisted snapshot includes.
+   */
+  persistExcludeQueryNames?: readonly string[];
 }
 
 export interface SyncQueryOptions {
@@ -131,6 +147,20 @@ export interface SyncQueryOptions {
    * fresh by construction).
    */
   staleTime?: number;
+  /**
+   * Opt this query OUT of (`false`) the host app's persisted-cache snapshot
+   * (`@papercusp/sync`'s `persisted-cache.ts`, WI-3318/WI-6656) by stamping
+   * `meta.persist = false` on the underlying react-query entry. Omit to
+   * inherit the provider-level default — see `SyncProviderProps.persistExcludeQueryNames`
+   * for excluding a query by NAME across every call site instead of
+   * per-call. Passing `persist: true` here always overrides a provider-level
+   * exclusion for that one call site.
+   *
+   * A query the host never persists (no `enablePersistedSyncCache()` call)
+   * ignores this entirely — it only affects what a persisted-cache snapshot
+   * includes, never the live in-memory cache or refetch behavior.
+   */
+  persist?: boolean;
   /*
    * NOTE — `priority: 'interactive' | 'background'` used to live here (WI-5851)
    * and was REMOVED on 2026-07-26 with the batcher it existed to steer

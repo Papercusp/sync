@@ -24,6 +24,13 @@ interface PollingConfig {
    * even though desktop IPC has no per-host connection limit.
    */
   maxInFlightFetches?: number;
+  /**
+   * Query names to exclude from the host's persisted-cache snapshot by
+   * default (WI-6656) — threaded down from `SyncProviderProps.persistExcludeQueryNames`.
+   * A per-call `persist: true` on `useSyncQuery` overrides this for that one
+   * call site.
+   */
+  persistExcludeQueryNames?: readonly string[];
 }
 
 // Stable singleton empty array so consumers that depend on `data` reference
@@ -45,10 +52,19 @@ export function createUsePollingQuery(config: PollingConfig) {
     config.tokenQueryParam,
     config.maxInFlightFetches ?? DEFAULT_MAX_IN_FLIGHT,
   );
+  // Built once per adapter mount (config is stable per useMemo at the call
+  // site), not per render.
+  const persistExcludeSet = config.persistExcludeQueryNames
+    ? new Set(config.persistExcludeQueryNames)
+    : null;
 
   return function usePollingQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
-    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime } = opts;
+    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime, persist } = opts;
     const interval = pollIntervalMs ?? config.defaultPollIntervalMs;
+    // WI-6656: stamp `meta.persist = false` for a query the provider (or this
+    // call) opted out of the persisted-cache snapshot. A per-call `persist`
+    // always wins over the provider-level name exclusion.
+    const persistFalse = persist === false || (persist === undefined && persistExcludeSet?.has(queryName));
     // Stable string key for the args object — useCallback dep that doesn't
     // churn on every render the way the `{}` default would.
     const argsKey = JSON.stringify(args);
@@ -84,6 +100,7 @@ export function createUsePollingQuery(config: PollingConfig) {
       enabled,
       placeholderData: keepPreviousData,
       ...(staleTime !== undefined ? { staleTime } : {}),
+      ...(persistFalse ? { meta: { persist: false } } : {}),
     });
 
     // Track cache hits: when the hook returns data on the first render without

@@ -68,6 +68,7 @@ export function SyncProvider({
   endpointOverride,
   visibilityPause,
   maxInFlightFetches,
+  persistExcludeQueryNames,
 }: SyncProviderProps) {
   const { activeTransport, onTransportError } = useTransportFallback({
     preferred: syncType,
@@ -92,6 +93,7 @@ export function SyncProvider({
     onTransportError,
     // Shared by both adapters — both drive the same single-query fetcher.
     maxInFlightFetches,
+    persistExcludeQueryNames,
     // SSE-only knobs — the polling adapter ignores them.
     tokenQueryParam,
     endpointOverride,

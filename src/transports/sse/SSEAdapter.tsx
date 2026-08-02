@@ -98,6 +98,8 @@ interface SSEAdapterProps {
   visibilityPause?: boolean;
   /** Max sync requests in flight at once (default 24). See query-fetcher.ts. */
   maxInFlightFetches?: number;
+  /** Query names excluded from the host's persisted-cache snapshot (WI-6656). */
+  persistExcludeQueryNames?: readonly string[];
 }
 
 const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
@@ -265,6 +267,7 @@ export function SSEAdapter({
   endpointOverride,
   visibilityPause,
   maxInFlightFetches,
+  persistExcludeQueryNames,
 }: SSEAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   const queryClient = getQueryClient();
@@ -276,8 +279,9 @@ export function SSEAdapter({
         defaultPollIntervalMs: pollIntervalMs,
         tokenQueryParam,
         maxInFlightFetches,
+        persistExcludeQueryNames,
       }),
-    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches],
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames],
   );
 
   const prefetch = useMemo(
