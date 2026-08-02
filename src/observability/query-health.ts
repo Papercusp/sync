@@ -22,6 +22,12 @@
  *   4. **slow fetch** — the first load took long enough that server compute
  *      (not transfer — this library's consumers are mostly loopback) is the
  *      likely cost. Fix: measure the resolver, don't guess.
+ *   7. **blank arg on an ENABLED query** — the query is live and one of its
+ *      args is `''`. An id/slug arg is the resolver's lookup key, so a blank
+ *      one is a round-trip that cannot resolve to anything; it repeats on
+ *      every poll. Fix: `enabled` until the arg is non-empty. Fires ONLY when
+ *      the query is enabled, so a correctly-gated `{ id: id ?? '' }` call site
+ *      is silent (papercusp no-http-anywhere-2026-07-28 P-027).
  *
  * OFF outside development (`NODE_ENV === 'development'`), free-ish inside it:
  * the only non-trivial work (JSON size estimate) runs once per query and only
@@ -53,6 +59,13 @@ export interface QueryHealthConfig {
   /** Warn when the SAME query fetches more than this many times inside
    *  refetchWindowMs (usually an over-broad SSE invalidation bridge). */
   refetchCountWarn: number;
+  /**
+   * Arg names for which an empty string is a MEANINGFUL value rather than an
+   * unresolved id — the blank-arg check skips these. Deliberately empty by
+   * default: the resolvers this library fronts treat `''` as "no value", and
+   * an exemption should be a considered, named decision, not a default.
+   */
+  blankArgAllow: readonly string[];
   /** Injectable warn sink (tests). */
   warn: (message: string) => void;
 }
@@ -68,6 +81,7 @@ const config: QueryHealthConfig = {
   argsChurnCountWarn: 4, // >4 distinct arg identities in 2s ⇒ unstable args
   refetchWindowMs: 10_000,
   refetchCountWarn: 12, // >12 fetches in 10s ⇒ over-broad invalidation thrash
+  blankArgAllow: [],
   // eslint-disable-next-line no-console
   warn: (message: string) => console.warn(message),
 };
@@ -145,6 +159,27 @@ export function useQueryHealthObserver(opts: SyncQueryOptions, result: SyncQuery
         argsChangeTimes: [],
         fetchStartTimes: [],
       });
+
+    // ── Defect 7: a blank arg on an ENABLED query ────────────────────────
+    // An id/slug arg IS the resolver's lookup key. A live query keyed on `''`
+    // cannot resolve to a row, yet still costs a round-trip on every poll
+    // interval for the life of the mount. The zod schema that actually
+    // requires the arg lives server-side and is not shipped to the client, so
+    // the client-side signal is "enabled + empty string" — which is why the
+    // check is scoped to ENABLED queries: `{ id: id ?? '' }` behind an
+    // `enabled: Boolean(id)` gate is the CORRECT shape and must stay silent.
+    if (enabled && opts.args) {
+      for (const [name, value] of Object.entries(opts.args)) {
+        if (value !== '' || config.blankArgAllow.includes(name)) continue;
+        warnOnce(
+          queryName,
+          `blank-arg:${name}`,
+          `"${queryName}" is enabled with \`${name}: ""\`. A blank id/slug is the resolver's lookup key, so this ` +
+            `request cannot resolve to anything — and it repeats every poll. Gate the query with ` +
+            `\`enabled: Boolean(${name})\` until the value is resolved (papercusp no-http-anywhere-2026-07-28 P-027).`,
+        );
+      }
+    }
 
     // ── Defect 1: the args-flip waterfall ────────────────────────────────
     if (argsKey !== state.argsKey) {

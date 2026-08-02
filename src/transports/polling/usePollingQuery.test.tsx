@@ -101,6 +101,66 @@ describe('usePollingQuery — queryKey stability (P-066)', () => {
   });
 });
 
+describe('usePollingQuery — a disabled query is not a spinner (P-027)', () => {
+  // no-http-anywhere-2026-07-28 D-007 RESULT 4 read a react-query cache dump,
+  // saw 9 keys built on a blank id sitting `status:'pending'`, and inferred
+  // that the two with a live observer were "a component subscribed to a query
+  // that will never return — a permanent spinner". `status` alone cannot
+  // support that: in TanStack v5 a DISABLED query is permanently `pending`
+  // with `fetchStatus:'idle'`, and `isLoading` is `isPending && isFetching`.
+  // These tests pin what a consumer of THIS adapter actually observes, so the
+  // distinction survives the next cache dump.
+  it('reports loading:false and never fetches while disabled', async () => {
+    const mockFetch = makeOkFetch({ rows: [], version: 'v1' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const usePollingQuery = createUsePollingQuery({
+      restEndpoint: ep(),
+      defaultPollIntervalMs: 60_000,
+    });
+
+    const { result } = renderHook(
+      () => usePollingQuery({ queryName: 'q.blankId', args: { id: '' }, enabled: false }),
+      { wrapper: makeWrapper() },
+    );
+
+    // The spinner test a consumer writes is `if (loading) …` — never `status`.
+    expect(result.current.loading).toBe(false);
+    expect(result.current.fetching).toBe(false);
+    expect(result.current.data).toEqual([]);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('the disabled key IS resident in the cache as pending/idle (the dump artifact)', async () => {
+    const mockFetch = makeOkFetch({ rows: [], version: 'v1' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const usePollingQuery = createUsePollingQuery({
+      restEndpoint: ep(),
+      defaultPollIntervalMs: 60_000,
+    });
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children);
+
+    renderHook(
+      () => usePollingQuery({ queryName: 'q.blankId2', args: { id: '' }, enabled: false }),
+      { wrapper },
+    );
+
+    const entry = qc.getQueryCache().find({ queryKey: ['sync', 'q.blankId2', { id: '' }] });
+    // Resident with an observer, exactly as the dump reported...
+    expect(entry).toBeDefined();
+    expect(entry?.state.status).toBe('pending');
+    expect(entry?.getObserversCount()).toBe(1);
+    // ...but idle, so it is holding a cache slot, not a spinner.
+    expect(entry?.state.fetchStatus).toBe('idle');
+  });
+});
+
 describe('usePollingQuery — cancellation (drop-sync-batcher P-008c)', () => {
   it('aborts the in-flight request when the last observer unmounts', async () => {
     // The batcher structurally COULD NOT do this — a batch is indivisible, so
