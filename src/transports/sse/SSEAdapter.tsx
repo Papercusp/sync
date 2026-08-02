@@ -131,7 +131,7 @@ interface UpdateEvent {
  * against a freshly-built client bundle. Empty ⇒ full-bust, which is a strict
  * superset of the scoped match and so can never drop a refresh.
  */
-function hasScope(args?: Record<string, unknown>): boolean {
+export function hasScope(args?: Record<string, unknown>): boolean {
   return args !== undefined && args !== null && Object.keys(args).length > 0;
 }
 
