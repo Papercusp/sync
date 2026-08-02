@@ -114,6 +114,27 @@ interface UpdateEvent {
   data: unknown[];
 }
 
+/**
+ * Does this event carry a real SCOPE, i.e. should it target one cache key rather
+ * than full-bust the name?
+ *
+ * The old test was a bare truthiness check on `args`, and `{}` IS TRUTHY — so an
+ * empty args bag built the key `['sync', name, {}]`, which TanStack's partial
+ * matching cannot match against a `['sync', name, undefined]` subscription (their
+ * `typeof` differs at position 2). The result: every `useSyncQuery({ queryName })`
+ * subscriber with no `args` — the common form, incl. the Accounts tab — silently
+ * ignored those invalidations. WI-6796.
+ *
+ * `scopingArgs` in server/invalidation-bus.ts now strips `{}` before it reaches the
+ * wire, so this is the belt-and-braces half: it keeps an OLDER operator (or any
+ * other producer that never funnels through that bus) from resurrecting the bug
+ * against a freshly-built client bundle. Empty ⇒ full-bust, which is a strict
+ * superset of the scoped match and so can never drop a refresh.
+ */
+function hasScope(args?: Record<string, unknown>): boolean {
+  return args !== undefined && args !== null && Object.keys(args).length > 0;
+}
+
 function SSESubscriber({
   endpoint,
   onError,
@@ -168,7 +189,7 @@ function SSESubscriber({
         if (parse === 'update') {
           const upd = ev as UpdateEvent;
           const cacheValue = { rows: upd.data, version: String(Date.now()) };
-          if (upd.args) {
+          if (hasScope(upd.args)) {
             queryClient.setQueryData(['sync', upd.name, upd.args], cacheValue);
           } else {
             queryClient.setQueriesData(
@@ -182,7 +203,7 @@ function SSESubscriber({
             );
           }
         } else {
-          if (ev.args) {
+          if (hasScope(ev.args)) {
             queryClient.invalidateQueries({ queryKey: ['sync', ev.name, ev.args] });
           } else {
             queryClient.invalidateQueries({
