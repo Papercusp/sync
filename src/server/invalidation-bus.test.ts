@@ -44,59 +44,6 @@ describe('invalidation-bus', () => {
     expect(events[0].data).toBeUndefined();
   });
 
-  // ── WI-6796: an EMPTY args bag must publish as full-bust, never as a literal {} ──
-  //
-  // The wire contract is "args absent ⇒ invalidate every entry under this name".
-  // The client tests that by truthiness, and `{}` is truthy — so an empty bag used
-  // to take the SCOPED branch and build the key ['sync', name, {}], which TanStack
-  // cannot match against a ['sync', name, undefined] subscription. Every
-  // useSyncQuery({ queryName }) subscriber that passed no args therefore ignored
-  // those invalidations, across 32 producer callsites. Owner symptom: "the accounts
-  // tab stopped updating".
-  it('an EMPTY args object publishes with NO args (full-bust), not a literal {}', async () => {
-    const clock = { t: 1000 };
-    const lb = makeLoopback();
-    const bus = createInvalidationBus({ listen: lb.listen, notify: lb.notify, now: () => clock.t });
-    const events: SyncEvent[] = [];
-    await bus.subscribe((e) => events.push(e));
-
-    await bus.notifyInvalidate('accounts.pool', {});
-
-    expect(events).toHaveLength(1);
-    // The load-bearing assertion: `args` must be ABSENT so the client takes its
-    // name-predicate branch. A literal {} here is the bug.
-    expect(events[0].args).toBeUndefined();
-    expect(JSON.parse(lb.delivered[0])).toEqual({ name: 'accounts.pool' });
-  });
-
-  it('an empty args bag and no args at all are the SAME notify (one dedupe slot, not two)', async () => {
-    const clock = { t: 1000 };
-    const lb = makeLoopback();
-    const bus = createInvalidationBus({ listen: lb.listen, notify: lb.notify, now: () => clock.t });
-    const events: SyncEvent[] = [];
-    await bus.subscribe((e) => events.push(e));
-
-    await bus.notifyInvalidate('accounts.pool', {});
-    await bus.notifyInvalidate('accounts.pool');
-    await bus.notifyInvalidate('accounts.pool', {});
-
-    // All three normalize to the identical payload, so the dedupe window collapses
-    // them to one. Before the fix `{}` and undefined keyed two separate slots.
-    expect(events).toHaveLength(1);
-  });
-
-  it('a NON-empty args bag still scopes — normalization only strips the empty case', async () => {
-    const clock = { t: 1000 };
-    const lb = makeLoopback();
-    const bus = createInvalidationBus({ listen: lb.listen, notify: lb.notify, now: () => clock.t });
-    const events: SyncEvent[] = [];
-    await bus.subscribe((e) => events.push(e));
-
-    await bus.notifyInvalidate('plans.get', { slug: 'my-plan' });
-
-    expect(events[0].args).toEqual({ slug: 'my-plan' });
-  });
-
   it('dedupes identical notifies inside the window, lets them through after', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
@@ -244,26 +191,6 @@ describe('invalidation-bus', () => {
     await bus.subscribe((e) => events.push(e));
     lb.deliver(JSON.stringify({ name: 'harness_shared.t.changed', args: { id: 'x', workspace_id: 'w' } }));
     const bridged = events.find((e) => e.name === 'list.byHarness');
-    expect(bridged).toBeDefined();
-    expect(bridged?.args).toBeUndefined();
-  });
-
-  // WI-6796, bridge half: a scope-key builder that returns {} means "I could not
-  // scope this" — that must full-bust like a bare-string target, not publish a
-  // literal {} no plain useSyncQuery({ queryName }) subscriber can match.
-  it('a bridge target carrying an EMPTY args object full-busts, like a bare-string target', async () => {
-    const lb = makeLoopback();
-    const bus = createInvalidationBus({
-      listen: lb.listen,
-      notify: lb.notify,
-      bridge: () => [{ name: 'accounts.pool', args: {} }],
-    });
-    const events: SyncEvent[] = [];
-    await bus.subscribe((e) => events.push(e));
-    lb.deliver(
-      JSON.stringify({ name: 'harness_shared.operator_account_pool.changed', args: { workspace_id: 'w' } }),
-    );
-    const bridged = events.find((e) => e.name === 'accounts.pool');
     expect(bridged).toBeDefined();
     expect(bridged?.args).toBeUndefined();
   });

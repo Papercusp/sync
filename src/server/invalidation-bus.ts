@@ -50,10 +50,7 @@ export interface ListenSource {
  *     `args`, so the client invalidates only the matching cache key — e.g.
  *     a single row's entry, built from the source event's row PK).
  *
- * A string and `{ name }` (no args) are equivalent — both full-bust. So is
- * `{ name, args: {} }`: see `scopingArgs` below — an EMPTY args object carries no
- * scoping information, so it is normalized to full-bust rather than published as a
- * literal `{}` that only an args-`{}` subscriber could ever match.
+ * A string and `{ name }` (no args) are equivalent — both full-bust.
  */
 export type BridgeTarget =
   | string
@@ -130,39 +127,6 @@ export interface InvalidationBus {
 const DEFAULT_HISTORY_WINDOW_MS = 60_000;
 const DEFAULT_DEDUPE_WINDOW_MS = 90_000;
 const DEFAULT_PAYLOAD_SIZE_LIMIT = 32 * 1024;
-
-/**
- * Normalize an `args` bag to the SCOPING intent it actually expresses:
- * `undefined` (full-bust) or a non-empty object (scoped).
- *
- * WHY THIS EXISTS (WI-6796). The wire contract is "no `args` ⇒ invalidate every
- * cache entry under this name; `args` present ⇒ invalidate only that key". The
- * client implements it as a truthiness check, and `{}` IS TRUTHY — so an empty
- * args bag took the SCOPED branch and produced the key `['sync', name, {}]`.
- * TanStack's partial matching then compares position 2 as `{}` vs `undefined`,
- * whose `typeof` differs, so it does not match: the invalidation silently missed
- * every subscriber that passed no `args` at all.
- *
- * That is not a corner case here — `useSyncQuery({ queryName })` with no `args` is
- * the common subscription form (the Accounts tab, the /adv Overview tiles), while
- * 32 producer callsites across 26 files pass a literal `{}`. Every one of those
- * pairs was a silent no-op: the write happened, the notify fanned out, the client
- * received it, and nothing refetched. Reported by the owner as "the accounts tab
- * stopped updating".
- *
- * Normalizing here (at the single point every producer funnels through) rather
- * than at each callsite means no future `{}` can reintroduce it. It is also
- * strictly SAFE — never a lost invalidation, because full-bust is a SUPERSET of
- * the scoped match: the name-predicate branch invalidates the args-`{}` entry too
- * (verified against @tanstack/query-core 5.100.5 — a `{}`-keyed invalidate hits
- * only the `{}` subscriber, while the predicate hits BOTH). So this can only ever
- * add refreshes that should have happened, never drop ones that did.
- */
-export function scopingArgs(
-  args?: Record<string, unknown>,
-): Record<string, unknown> | undefined {
-  return args !== undefined && Object.keys(args).length > 0 ? args : undefined;
-}
 
 /** Tiny non-crypto hash (FNV-1a, 32-bit) for the dedupe key's data leg.
  *  The key needs *equality* on the payload, not the payload bytes: storing
@@ -252,10 +216,7 @@ export function createInvalidationBus(
     // subscriber, scaling with fleet write-rate rather than viewer count).
     for (const target of bridge(parsed.name, ev.args)) {
       const name = typeof target === 'string' ? target : target.name;
-      // WI-6796: same normalization as notifyInvalidate — a scope-key builder that
-      // returns `{}` means "no scope", which must full-bust, not publish a literal
-      // `{}` that no plain `useSyncQuery({ queryName })` subscriber can match.
-      const targetArgs = scopingArgs(typeof target === 'string' ? undefined : target.args);
+      const targetArgs = typeof target === 'string' ? undefined : target.args;
       const key = `${name}|${targetArgs ? JSON.stringify(targetArgs) : ''}|`;
       if (!shouldFanout(key, ev.ts, dedupeWindowMs)) continue;
       const bridged: SyncEvent = { id: nextId++, ts: ev.ts, name };
@@ -321,17 +282,13 @@ export function createInvalidationBus(
     data?: unknown[],
     notifyOpts?: NotifyInvalidateOpts,
   ): Promise<void> {
-    // WI-6796: an empty `{}` expresses no scope, so it must go on the wire as
-    // ABSENT (full-bust) — publishing a literal `{}` sends the client down its
-    // exact-key branch, which cannot match a no-args subscriber. See scopingArgs.
-    const scoped = scopingArgs(args);
     let payload: Record<string, unknown> = { name };
-    if (scoped !== undefined) payload.args = scoped;
+    if (args !== undefined) payload.args = args;
     if (data !== undefined) {
       payload.data = data;
       if (JSON.stringify(payload).length > payloadSizeLimit) {
         payload = { name };
-        if (scoped !== undefined) payload.args = scoped;
+        if (args !== undefined) payload.args = args;
       }
     }
 
@@ -339,9 +296,7 @@ export function createInvalidationBus(
     // so a NEW row set still gets through; pure invalidates collapse. Only
     // a short hash goes into the key — never the payload itself.
     const dataKey = data === undefined ? '' : fnv1a(JSON.stringify(data));
-    // Key off the NORMALIZED args so `undefined` and `{}` — which now publish the
-    // identical payload — also share one dedupe slot instead of two.
-    const key = `${name}|${scoped ? JSON.stringify(scoped) : ''}|${dataKey}`;
+    const key = `${name}|${args ? JSON.stringify(args) : ''}|${dataKey}`;
     const ts = now();
     // Per-call dedupe override. A SELF-DEBOUNCED producer — e.g. the append-heavy
     // change-detector that polls max(id) every ~8s — is already rate-limited by its own
