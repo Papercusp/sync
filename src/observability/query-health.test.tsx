@@ -146,6 +146,47 @@ describe('refetch thrash', () => {
   });
 });
 
+describe('blank arg on an enabled query (P-027)', () => {
+  it('warns once per blank arg while the query is enabled', () => {
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { potSlug: '' } }), r: res() } },
+    );
+    rerender({ o: opts({ args: { potSlug: '' } }), r: res() });
+    rerender({ o: opts({ args: { potSlug: '' } }), r: res() });
+    const blanks = warn.mock.calls.filter(([m]) => String(m).includes('blank id/slug'));
+    expect(blanks).toHaveLength(1);
+    expect(blanks[0][0]).toContain('enabled: Boolean(potSlug)');
+  });
+
+  it('warns separately for each blank arg name', () => {
+    renderHook(() => useQueryHealthObserver(opts({ args: { id: '', harnessSlug: '' } }), res()));
+    expect(warn.mock.calls.filter(([m]) => String(m).includes('blank id/slug'))).toHaveLength(2);
+  });
+
+  it('stays silent for a correctly gated `id ?? ""` call site', () => {
+    // The whole point: `{ id: id ?? '' }` behind `enabled: Boolean(id)` is the
+    // CORRECT shape. A detector that flags it would be noise, and the noise is
+    // what gets the check switched off.
+    renderHook(() => useQueryHealthObserver(opts({ args: { id: '' }, enabled: false }), res()));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-empty args, zeroes and nulls', () => {
+    renderHook(() =>
+      useQueryHealthObserver(opts({ args: { id: 'WI-1', beforeSeq: 0, owner: null } }), res()),
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('honours the blankArgAllow exemption list', () => {
+    configureQueryHealth({ blankArgAllow: ['q'] });
+    renderHook(() => useQueryHealthObserver(opts({ args: { q: '' } }), res()));
+    expect(warn).not.toHaveBeenCalled();
+    configureQueryHealth({ blankArgAllow: [] });
+  });
+});
+
 describe('kill switch', () => {
   it('does nothing when disabled', () => {
     configureQueryHealth({ enabled: false });
