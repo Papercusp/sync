@@ -6,8 +6,12 @@
  * of them at once, and two environments still cap parallel connections:
  *
  *   - the desktop's pre-handshake window (up to ~30s from webview mount until
- *     the sidecar signals `PAPERCUSP_IPC_READY`), where `ipcFetch` falls back
- *     to plain HTTP and the webview's own per-host connection pool applies;
+ *     the IPC bridge is connected), where `ipcFetch` falls back to plain HTTP
+ *     and the webview's own per-host connection pool applies. ⚠ The webview
+ *     cannot observe `PAPERCUSP_IPC_READY` — that is a sidecar→Rust STDOUT
+ *     handshake. From this layer the transport is read by ASSERTION, via
+ *     `endpoint_ipc_status().client === 'connected'` (D-047 of
+ *     no-http-anywhere-2026-07-28);
  *   - the `:3055` dev browser, where `tauri dev` skips the sidecar entirely.
  *
  * Unbounded there means the surplus queues in the connection pool and starves

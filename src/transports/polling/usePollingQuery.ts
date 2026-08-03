@@ -45,8 +45,12 @@ export function createUsePollingQuery(config: PollingConfig) {
   // than as one bundle AND paints incrementally, because a slow query occupies
   // one slot instead of holding the whole wave's results hostage
   // (drop-sync-batcher-2026-07-25 D-001). The gate is what keeps that safe on
-  // the two paths where a per-host connection cap is still real: the desktop's
-  // pre-`PAPERCUSP_IPC_READY` HTTP fallback, and the `:3055` dev browser.
+  // the paths where a per-host connection cap is still real: the desktop's
+  // pre-IPC HTTP fallback, and the `:3055` dev browser. ⚠ `PAPERCUSP_IPC_READY`
+  // is a sidecar→Rust STDOUT handshake and is NOT observable from the webview;
+  // the caller asserts the transport via `endpoint_ipc_status().client` and
+  // retunes this gate's cap through `maxInFlightFetches` (D-047 of
+  // no-http-anywhere-2026-07-28).
   const fetchQuery = getQueryFetcher(
     config.restEndpoint,
     config.tokenQueryParam,
