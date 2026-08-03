@@ -8,10 +8,28 @@
  * and the SSE primitives are INJECTED, so this module pulls in no domain
  * or transport dependency.
  *
- * Wire contract (matches the client transport):
+ * Wire contract:
  *   GET  rest-query?name=&args=<json>      → { rows, version } | { error }
- *   POST rest-query-batch { queries[] }    → { results: ({rows,version}|{error})[] }
  *   GET  sse                               → text/event-stream (invalidate|update|heartbeat)
+ *
+ * ⚠ `POST rest-query-batch` (`createRestBatchHandler` below) is NOT part of the
+ * contract this library's own client transport speaks, and has not been since
+ * 2026-07-26 — do not read it as live. `transports/polling/query-fetcher.ts`
+ * issues ONE `GET rest-query` per query through a bounded concurrency gate; the
+ * client batcher was deleted (drop-sync-batcher-2026-07-25). The handler is kept
+ * only for hosts that mount it themselves; papercusp mounts it nowhere.
+ *
+ * 🚫 Do NOT "revive" batching here, and do NOT add streaming (NDJSON /
+ * chunked-frame) results to it. That exact design was worked out in detail and
+ * REJECTED — see drop-sync-batcher-2026-07-25 **D-001**: it reimplements, worse,
+ * what individual requests do natively, and a bundle is indivisible so it cannot
+ * restore per-query `AbortSignal` cancellation. MEASURED at the 6-connection cap
+ * (the one regime batching could pay in): bundle of 95 = 2676 ms vs 95 individual
+ * = 1126 ms wall / p50 9.4 ms — individual wins 2.4x. Over desktop IPC, 106
+ * queries cost 2922 ms individual vs 3000 ms bundled, with ~7.6x better
+ * time-to-first-paint. Reopening requires NEW measurements (D-001; re-refuted as
+ * no-http-anywhere-2026-07-28 D-069, which dropped P-018 for proposing exactly
+ * this).
  */
 
 import { NAME_NOT_FOUND, type NamedQueryResolver } from './query-registry';
@@ -77,7 +95,16 @@ interface BatchQuery {
   args?: unknown;
 }
 
-/** POST rest-query-batch { queries[] } — positional results, per-slot errors. */
+/**
+ * POST rest-query-batch { queries[] } — positional results, per-slot errors.
+ *
+ * ⚠ Mounted NOWHERE in papercusp and unused by this library's own client
+ * transport (see the file header). If you arrived here intending to revive
+ * batching or make it stream results incrementally, read
+ * drop-sync-batcher-2026-07-25 **D-001** first — that design was rejected on
+ * measurements, and individual requests beat this handler even at the
+ * 6-connection cap.
+ */
 export function createRestBatchHandler(
   resolve: NamedQueryResolver,
   opts?: { maxBatch?: number },
