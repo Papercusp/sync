@@ -282,6 +282,125 @@ describe('persisted sync cache', () => {
     expect(storage.map.has(KEY)).toBe(false);
   });
 
+  // ----------------------------------------------------------- P-029 / D-038
+  // Per-ENTRY size cap. The snapshot is rehydrated synchronously before the
+  // first component mounts, so every restored entry is a zero-observer cache
+  // entry until some panel subscribes — and under the sync client's 1-hour
+  // gcTime, whatever the boot route does not render stays resident for an hour.
+  // Measured live 2026-08-03 on /adv: 36 of 57 keys had zero observers holding
+  // 1.46 MB, and THREE entries were 91% of it.
+
+  it('P-029: excludes a single OVERSIZED entry while still persisting small ones', () => {
+    const storage = memoryStorage();
+    const client = track(new QueryClient());
+    // 4000 chars => ~8000 bytes. Cap at 2000 bytes: the big one is dropped,
+    // the small one still round-trips (this is a per-ENTRY cap, not maxBytes,
+    // which would have thrown the whole snapshot away).
+    const stop = startSyncCachePersistence({ client, storage, maxEntryBytes: 2000 });
+    client.setQueryData(['sync', 'huge', {}], { rows: ['x'.repeat(4000)] });
+    client.setQueryData(['sync', 'small', {}], { rows: [1, 2, 3] });
+    vi.advanceTimersByTime(1000);
+    stop();
+
+    const target = track(new QueryClient());
+    expect(restorePersistedSyncCache({ client: target, storage })).toBe(true);
+    expect(target.getQueryData(['sync', 'small', {}])).toEqual({ rows: [1, 2, 3] });
+    expect(target.getQueryData(['sync', 'huge', {}])).toBeUndefined();
+  });
+
+  it('P-029: a refetch of an EXCLUDED entry does not trigger a wasted serialize', () => {
+    // The regression this guards: `signature()` and `shouldDehydrateQuery` must
+    // apply the SAME predicate. If the signature still counted an oversized
+    // entry that dehydrate then skipped, every refetch of the LARGEST queries
+    // would move the signature and force a full dehydrate+stringify that
+    // persists nothing — reintroducing exactly the per-event O(BYTES) main-thread
+    // cost WI-6502 removed, on the worst possible queries.
+    // Self-calibrating: run the SAME churn capped and uncapped and compare.
+    // An absolute call-count bound would be brittle — react-query's own
+    // `setQueryData` hashes the query key with JSON.stringify, so some calls in
+    // the spy belong to the library, not to us.
+    const churn = (maxEntryBytes: number) => {
+      const storage = memoryStorage();
+      const client = track(new QueryClient());
+      const writes: string[] = [];
+      const counting: SyncCacheStorage = {
+        getItem: storage.getItem,
+        setItem: (k, v) => {
+          writes.push(k);
+          storage.setItem(k, v);
+        },
+        removeItem: storage.removeItem,
+      };
+      const stop = startSyncCachePersistence({ client, storage: counting, maxEntryBytes });
+      client.setQueryData(['sync', 'small', {}], { rows: [1] });
+      vi.advanceTimersByTime(1000);
+
+      // Non-vacuity FIRST: a change to a PERSISTED entry must still serialize,
+      // so a low count below means "the gate short-circuited", never "the flush
+      // never ran at all".
+      const spy = vi.spyOn(JSON, 'stringify');
+      client.setQueryData(['sync', 'small', {}], { rows: [1, 2] });
+      vi.advanceTimersByTime(1000);
+      const onPersistedChange = spy.mock.calls.length;
+
+      spy.mockClear();
+      writes.length = 0;
+      // Now churn the EXCLUDED entry the way a poll/SSE refetch would.
+      for (let i = 0; i < 5; i++) {
+        client.setQueryData(['sync', 'huge', {}], { rows: ['x'.repeat(4000) + i] });
+        vi.advanceTimersByTime(1000);
+      }
+      const onExcludedChurn = spy.mock.calls.length;
+      spy.mockRestore();
+      stop();
+      return { onPersistedChange, onExcludedChurn, writesDuringChurn: writes.length };
+    };
+
+    const capped = churn(2000);
+    const uncapped = churn(Number.POSITIVE_INFINITY);
+
+    expect(capped.onPersistedChange).toBeGreaterThan(0); // the flush path is live
+    // The whole point: churning an entry we never persist must not re-serialize
+    // or re-write the snapshot at all.
+    expect(capped.writesDuringChurn).toBe(0);
+    expect(uncapped.writesDuringChurn).toBeGreaterThan(0); // control: it WOULD have
+    expect(capped.onExcludedChurn).toBeLessThan(uncapped.onExcludedChurn);
+  });
+
+  it('P-029: maxEntryBytes:Infinity restores the persist-everything behaviour', () => {
+    const storage = memoryStorage();
+    const client = track(new QueryClient());
+    const stop = startSyncCachePersistence({
+      client,
+      storage,
+      maxEntryBytes: Number.POSITIVE_INFINITY,
+    });
+    client.setQueryData(['sync', 'huge', {}], { rows: ['x'.repeat(4000)] });
+    vi.advanceTimersByTime(1000);
+    stop();
+
+    const target = track(new QueryClient());
+    expect(restorePersistedSyncCache({ client: target, storage })).toBe(true);
+    expect(target.getQueryData(['sync', 'huge', {}])).toEqual({ rows: ['x'.repeat(4000)] });
+  });
+
+  it('P-029: the default cap drops a >256 KiB entry with no options passed', () => {
+    const storage = memoryStorage();
+    const client = track(new QueryClient());
+    // Guards the DEFAULT, not just the option plumbing: a default of Infinity
+    // (or a forgotten `?? DEFAULT_MAX_ENTRY_BYTES`) would persist this.
+    const stop = startSyncCachePersistence({ client, storage });
+    client.setQueryData(['sync', 'over', {}], { rows: ['x'.repeat(200_000)] }); // ~400 KiB
+    client.setQueryData(['sync', 'under', {}], { rows: ['y'.repeat(1000)] }); // ~2 KiB
+    vi.advanceTimersByTime(1000);
+    stop();
+
+    const target = track(new QueryClient());
+    expect(restorePersistedSyncCache({ client: target, storage })).toBe(true);
+    expect(target.getQueryData(['sync', 'under', {}])).toEqual({ rows: ['y'.repeat(1000)] });
+    expect(target.getQueryData(['sync', 'over', {}])).toBeUndefined();
+  });
+
   it('returns false with no storage available (SSR / storage-disabled webview)', () => {
     const target = track(new QueryClient());
     // jsdom HAS localStorage; force the no-storage path via an explicit null-ish seam.

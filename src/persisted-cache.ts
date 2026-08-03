@@ -52,6 +52,31 @@ export interface PersistedSyncCacheOptions {
    * QuotaExceededError on every write.
    */
   maxBytes?: number;
+  /**
+   * Skip persisting any SINGLE query whose serialized data exceeds this many
+   * BYTES (UTF-16, i.e. `.length * 2` — same accounting as `maxBytes`).
+   * Default 256 KiB, a sixteenth of the default whole-snapshot budget.
+   * `Infinity` restores the old persist-everything behaviour.
+   *
+   * P-029 / D-038. The persisted snapshot is rehydrated SYNCHRONOUSLY before
+   * the first component mounts, so every restored entry is a zero-observer
+   * cache entry until some panel subscribes — and under the sync client's
+   * 1-hour gcTime, whatever the boot route does not render stays resident for
+   * an hour. Measured live 2026-08-03 on /adv: 36 of 57 cached keys had zero
+   * observers holding 1.46 MB, and THREE entries were 91% of it
+   * (`agentRunsConsolidated.bySlug` 1090 KiB, `featuresConsolidated.bySlug`
+   * 976 KiB, `learning.improvements` 588 KiB). The stored snapshot itself was
+   * 3.03 MB against the 4 MiB `maxBytes` cap — 76% of a cliff past which the
+   * write is skipped SILENTLY and persistence stops for every query, not just
+   * the oversized one.
+   *
+   * Large payloads are where stale-while-revalidate pays least and costs most:
+   * `staleTime` is 5s, so they are re-fetched almost immediately anyway, while
+   * they dominate both the quota and the rehydration cost. Capping per-entry
+   * (rather than naming queries) means the next large query is covered without
+   * anyone remembering to opt it out with `meta.persist: false`.
+   */
+  maxEntryBytes?: number;
   /** Debounce between cache-event and write. Default 1000ms. */
   debounceMs?: number;
   /** Default `window.localStorage`. */
@@ -71,6 +96,8 @@ const ENVELOPE_VERSION = 1;
 const DEFAULT_KEY = 'papercusp:sync-cache:v1';
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
+/** P-029 / D-038 — see `maxEntryBytes`. A sixteenth of DEFAULT_MAX_BYTES. */
+const DEFAULT_MAX_ENTRY_BYTES = 256 * 1024;
 const DEFAULT_DEBOUNCE_MS = 1000;
 /**
  * WI-6502: after this many consecutive failed/over-budget writes, stop trying.
@@ -138,6 +165,7 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
   const client = opts.client ?? getQueryClient();
   const debounceMs = opts.debounceMs ?? DEFAULT_DEBOUNCE_MS;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
+  const maxEntryBytes = opts.maxEntryBytes ?? DEFAULT_MAX_ENTRY_BYTES;
 
   // WI-5983: dedup against the last WRITTEN payload (content only — the `ts`
   // field is excluded from the comparison so a no-op tick doesn't count as a
@@ -168,12 +196,44 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
   // expensive comparison was answering. The content dedup stays as the
   // second-line check for the case where a refetch really did land.
   let lastSignature: string | null = null;
+
+  // P-029 / D-038: per-entry size verdicts, memoized on (queryHash,
+  // dataUpdatedAt) so the measuring stringify runs only when a query's DATA
+  // actually changed — not on every cache event. This memo is why the size cap
+  // does not reintroduce the per-event O(BYTES) main-thread cost WI-6502 removed.
+  //
+  // The verdict map is rebuilt HERE (this already walks every query on each
+  // flush) and READ by `shouldDehydrateQuery` below. Both MUST apply the same
+  // predicate: if the signature counted an entry that dehydrate then skipped,
+  // every refetch of an excluded query would change the signature and force a
+  // full dehydrate+stringify that persists nothing — i.e. exactly the wasted
+  // flush this memo exists to prevent, on the largest queries in the cache.
+  let sizeVerdicts = new Map<string, boolean>();
+  const verdictKey = (hash: string, updatedAt: number): string => hash + '@' + updatedAt;
+
   const signature = (): string => {
     const parts: string[] = [];
+    const next = new Map<string, boolean>();
     for (const q of client.getQueryCache().getAll()) {
       if (q.state.status !== 'success' || q.meta?.persist === false) continue;
+      const vk = verdictKey(q.queryHash, q.state.dataUpdatedAt);
+      let fits = sizeVerdicts.get(vk);
+      if (fits === undefined) {
+        try {
+          fits = JSON.stringify(q.state.data).length * 2 <= maxEntryBytes;
+        } catch {
+          // Unserializable data can never be persisted — dehydrate would throw
+          // and take the whole snapshot down with it.
+          fits = false;
+        }
+      }
+      next.set(vk, fits);
+      if (!fits) continue;
       parts.push(q.queryHash, String(q.state.dataUpdatedAt));
     }
+    // Replacing (not mutating) bounds the memo to queries still in the cache —
+    // evicted/gc'd entries drop out instead of accumulating forever.
+    sizeVerdicts = next;
     return parts.join('\u001f');
   };
 
@@ -199,7 +259,13 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
     lastSignature = sig;
     try {
       const state = dehydrate(client, {
-        shouldDehydrateQuery: (q) => q.state.status === 'success' && q.meta?.persist !== false,
+        shouldDehydrateQuery: (q) =>
+          q.state.status === 'success' &&
+          q.meta?.persist !== false &&
+          // P-029 / D-038. Reads the verdict `signature()` just computed for this
+          // exact (queryHash, dataUpdatedAt); a missing verdict means the entry
+          // appeared between the two walks, so persist it as before.
+          sizeVerdicts.get(verdictKey(q.queryHash, q.state.dataUpdatedAt)) !== false,
       });
       // Stable comparison key: same shape as the envelope minus `ts` AND minus
       // each query's `dehydratedAt` (react-query stamps `dehydratedAt:
