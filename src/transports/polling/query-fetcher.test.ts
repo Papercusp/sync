@@ -142,6 +142,26 @@ describe('getQueryFetcher — request shape', () => {
     getQueryFetcher(e, undefined, 4);
     expect(getFetchGate(e)!.limit).toBe(4);
   });
+
+  it('an OMITTED cap adopts the existing gate instead of un-capping it (P-019/WI-6628)', () => {
+    const e = ep();
+    // The provider caps the shared gate: IPC is not proven to carry fetch.
+    getQueryFetcher(e, undefined, CONNECTION_CAPPED_MAX_IN_FLIGHT);
+    expect(getFetchGate(e)!.limit).toBe(CONNECTION_CAPPED_MAX_IN_FLIGHT);
+
+    // `fetchSyncQuery` (the dock's imperative layout load) passes NO cap. It
+    // must not resolve its own `undefined` to DEFAULT_MAX_IN_FLIGHT — doing so
+    // called setLimit(24) on this shared gate and un-capped it, measured live
+    // as /adv=24 vs /settings=2 with PAPERCUSP_DESKTOP_IPC=0 (2026-08-03).
+    getQueryFetcher(e);
+    expect(getFetchGate(e)!.limit).toBe(CONNECTION_CAPPED_MAX_IN_FLIGHT);
+
+    // An EXPLICIT default still retunes — that is exactly how the provider
+    // raises the cap once IPC is PROVEN to carry fetch, so the fix must not
+    // break the raise it exists to gate.
+    getQueryFetcher(e, undefined, DEFAULT_MAX_IN_FLIGHT);
+    expect(getFetchGate(e)!.limit).toBe(DEFAULT_MAX_IN_FLIGHT);
+  });
 });
 
 describe('CONNECTION_CAPPED_MAX_IN_FLIGHT (WI-6253)', () => {

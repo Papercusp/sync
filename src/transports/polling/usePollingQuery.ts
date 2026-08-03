@@ -156,7 +156,14 @@ export function createPrefetchSync(config: PollingConfig, queryClient: QueryClie
 }
 
 /** Imperative access to the same named-query cache used by useSyncQuery.
- * Useful for async store interfaces (dock layouts) that cannot call hooks. */
+ * Useful for async store interfaces (dock layouts) that cannot call hooks.
+ *
+ * ⚠ `maxInFlightFetches` is passed through UNRESOLVED on purpose — see
+ * `getQueryFetcher`. This is an opinion-less caller: it must never resolve its
+ * own `undefined` to `DEFAULT_MAX_IN_FLIGHT`, because that would `setLimit(24)`
+ * on the SHARED gate and un-cap a provider that deliberately capped it. Doing
+ * exactly that made `/adv` run at 24 while `/settings` ran at 2 with IPC
+ * disabled (measured live 2026-08-03, P-019/WI-6628). */
 export async function fetchSyncQuery<T = unknown>(opts: SyncQueryOptions & {
   restEndpoint?: string;
   tokenQueryParam?: string;
@@ -170,7 +177,7 @@ export async function fetchSyncQuery<T = unknown>(opts: SyncQueryOptions & {
     tokenQueryParam,
     maxInFlightFetches,
   } = opts;
-  const fetchQuery = getQueryFetcher(restEndpoint, tokenQueryParam, maxInFlightFetches ?? DEFAULT_MAX_IN_FLIGHT);
+  const fetchQuery = getQueryFetcher(restEndpoint, tokenQueryParam, maxInFlightFetches);
   const result = await getQueryClient().fetchQuery({
     queryKey: ['sync', queryName, args],
     queryFn: ({ signal }) => fetchQuery(queryName, args, { signal }),

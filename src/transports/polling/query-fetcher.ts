@@ -199,21 +199,40 @@ async function describeHttpError(
  *
  * `maxInFlight` on a later call retunes the existing gate in place rather than
  * minting a second fetcher, so the endpoint keeps exactly one cap.
+ *
+ * ⚠ OMITTING `maxInFlight` means "I have NO OPINION on concurrency", NOT "use
+ * the default". It is only a fallback when this call CREATES the gate; against
+ * an existing gate it leaves the cap alone. The difference is load-bearing:
+ * the gate is shared process-wide, so an opinion-less caller that resolved its
+ * own `undefined` to `DEFAULT_MAX_IN_FLIGHT` would call `setLimit(24)` and
+ * silently UN-CAP a gate the provider had deliberately capped.
+ *
+ * That is not hypothetical — measured live 2026-08-03 (P-019/WI-6628): with IPC
+ * disabled the provider correctly capped this gate to
+ * `CONNECTION_CAPPED_MAX_IN_FLIGHT`, and `fetchSyncQuery` (the dock's imperative
+ * layout load, which passes no cap) raised it straight back to 24 on every
+ * dock route — `/adv` read 24 while `/settings` read 2, re-arming the WI-6253
+ * stampede on the app's primary surfaces. A caller that genuinely wants the
+ * IPC-tuned default must pass `DEFAULT_MAX_IN_FLIGHT` explicitly, which is what
+ * the provider path does (it always resolves to a concrete number, so raising
+ * back to 24 once IPC is proven still works).
  */
 export function getQueryFetcher(
   restEndpoint: string,
   tokenQueryParam?: string,
-  maxInFlight: number = DEFAULT_MAX_IN_FLIGHT,
+  maxInFlight?: number,
   requestTimeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
 ): QueryFetch {
   const key = keyFor(restEndpoint, tokenQueryParam);
   const existing = fetchers.get(key);
   if (existing) {
-    if (existing.gate.limit !== maxInFlight) existing.gate.setLimit(maxInFlight);
+    if (maxInFlight !== undefined && existing.gate.limit !== maxInFlight) {
+      existing.gate.setLimit(maxInFlight);
+    }
     return existing.fetchQuery;
   }
 
-  const gate = createConcurrencyGate(maxInFlight);
+  const gate = createConcurrencyGate(maxInFlight ?? DEFAULT_MAX_IN_FLIGHT);
   // P-003(b): publish the gate's LIVE depth. `inFlight`/`queued` have been on
   // the gate interface since it was written and nothing outside tests ever read
   // them, so a saturated gate — the exact condition that makes a user wait —
