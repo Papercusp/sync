@@ -161,7 +161,10 @@ function SSESubscriber({
           return;
         }
         syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
-        syncMetrics.invalidateFromSse();
+        // EI-19406583179082751: name-tag the counter so `logInvalidationsBySse()` can
+        // attribute a push-volume anomaly to specific query names instead of only the
+        // aggregate `fromSse` total.
+        syncMetrics.invalidateFromSse(ev.name);
         // Fan the raw event out to app-level listeners (bus-tap) so consumers
         // like attention notifiers share THIS stream instead of opening their
         // own EventSource against the same route (each standing stream costs a

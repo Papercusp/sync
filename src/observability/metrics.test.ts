@@ -48,7 +48,17 @@ describe('syncMetrics counters', () => {
     syncMetrics.invalidateFromManual();
     const s = syncMetrics.snapshot();
     expect(s.cache).toEqual({ hits: 1, misses: 2 });
-    expect(s.invalidations).toEqual({ fromSse: 1, fromTimer: 1, fromManual: 1 });
+    expect(s.invalidations).toEqual({ fromSse: 1, fromTimer: 1, fromManual: 1, bySseName: {} });
+  });
+
+  it('EI-19406583179082751: invalidateFromSse(name) attributes the count per query name', () => {
+    syncMetrics.invalidateFromSse('plans.list');
+    syncMetrics.invalidateFromSse('plans.list');
+    syncMetrics.invalidateFromSse('work_items.list');
+    syncMetrics.invalidateFromSse(); // no name — still counts toward the aggregate, not bySseName
+    const s = syncMetrics.snapshot();
+    expect(s.invalidations.fromSse).toBe(4);
+    expect(s.invalidations.bySseName).toEqual({ 'plans.list': 2, 'work_items.list': 1 });
   });
 
   it('__resetForTests wipes every counter', () => {

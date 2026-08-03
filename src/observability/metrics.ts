@@ -97,6 +97,16 @@ export interface SyncMetricsSnapshot {
     fromTimer: number;
     /** Invalidations triggered explicitly via the result.invalidate() callback. */
     fromManual: number;
+    /**
+     * EI-19406583179082751: `fromSse` alone cannot say WHICH query names dominate an
+     * SSE-push-volume anomaly (a 96k-events/5h idle-client measurement had no way to
+     * attribute the count). Per-name counts of SSE-driven invalidations, keyed by the
+     * server-pushed `event.name` — a broadcast the client never subscribed to still
+     * increments its entry here, so a name with a high count and zero matching entries
+     * in `byQuery` is exactly the "server broadcasts events this client doesn't observe"
+     * signature `logInvalidationsBySse()` is built to surface.
+     */
+    bySseName: Record<string, number>;
   };
   transport: SyncTransportSnapshot;
   /** Per-queryName rollup, keyed by query name. */
@@ -124,6 +134,7 @@ interface MetricsState {
   };
   cache: { hits: number; misses: number };
   invalidations: { fromSse: number; fromTimer: number; fromManual: number };
+  invalidationsBySseName: Map<string, number>;
   transport: {
     requests: number;
     failures: number;
@@ -161,6 +172,7 @@ const state: MetricsState = {
   },
   cache: { hits: 0, misses: 0 },
   invalidations: { fromSse: 0, fromTimer: 0, fromManual: 0 },
+  invalidationsBySseName: new Map(),
   transport: freshTransport(),
   byQuery: new Map(),
   recent: [],
@@ -200,8 +212,16 @@ export const syncMetrics = {
     state.cache.misses++;
   },
   // Invalidation source
-  invalidateFromSse(): void {
+  /**
+   * `name` (the server-pushed event's query name) is optional so no existing call
+   * site is stranded, but SSEAdapter always has it available and passes it — see
+   * `bySseName` on the snapshot for why this matters.
+   */
+  invalidateFromSse(name?: string): void {
     state.invalidations.fromSse++;
+    if (name) {
+      state.invalidationsBySseName.set(name, (state.invalidationsBySseName.get(name) ?? 0) + 1);
+    }
   },
   invalidateFromTimer(): void {
     state.invalidations.fromTimer++;
@@ -286,7 +306,10 @@ export const syncMetrics = {
         bytesReceived: state.sse.bytesReceived,
       },
       cache: { ...state.cache },
-      invalidations: { ...state.invalidations },
+      invalidations: {
+        ...state.invalidations,
+        bySseName: Object.fromEntries(state.invalidationsBySseName),
+      },
     };
   },
   // Test/debug only — wipe counters.
@@ -301,6 +324,7 @@ export const syncMetrics = {
     state.invalidations.fromSse = 0;
     state.invalidations.fromTimer = 0;
     state.invalidations.fromManual = 0;
+    state.invalidationsBySseName.clear();
     state.transport = freshTransport();
     state.byQuery.clear();
     state.recent.length = 0;
@@ -342,6 +366,26 @@ export function installSyncMetricsGlobal(): void {
           failures: s.failures,
         }))
         .sort((a, b) => b.kb - a.kb);
+      // eslint-disable-next-line no-console
+      console.table(rows);
+    },
+    /**
+     * EI-19406583179082751: per-name SSE-push volume, heaviest first, with `refetched`
+     * (from `byQuery.requests`) alongside it — a name with a high `sseInvalidations` and
+     * `refetched: 0` is a server broadcast this page never asked for (either unobserved
+     * on this route, or a `queryClient.invalidateQueries` predicate matching zero mounted
+     * queries). Answers "which query names dominate the push volume" directly, without a
+     * bespoke repro script.
+     */
+    logInvalidationsBySse: () => {
+      const { invalidations, byQuery } = syncMetrics.snapshot();
+      const rows = Object.entries(invalidations.bySseName)
+        .map(([name, sseInvalidations]) => ({
+          name,
+          sseInvalidations,
+          refetched: byQuery[name]?.requests ?? 0,
+        }))
+        .sort((a, b) => b.sseInvalidations - a.sseInvalidations);
       // eslint-disable-next-line no-console
       console.table(rows);
     },
