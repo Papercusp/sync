@@ -307,6 +307,58 @@ describe('invalidation-bus', () => {
     expect(events.filter((e) => e.name === 'plans.items')).toHaveLength(1);
   });
 
+  // ── WI-37446: the mirror of the test above. That one proves one SOURCE's
+  // several TARGETS don't cross-suppress; this proves several SOURCES sharing
+  // ONE target don't either. Without the source in the key, the chattiest
+  // source holds the shared window and silently swallows every other source's
+  // events — measured live as the mode pill rendering a stale contract for 90s
+  // because coord_presence (~1999 writes/10min) monopolised advRoster.list's
+  // window against agent_modes' rare, meaningful writes. ────────────────────
+
+  it('several source tables bridged to the SAME target are not cross-suppressed', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000, // the real production default
+      bridge: (name) =>
+        name === 'harness_shared.coord_presence.changed' ||
+        name === 'harness_shared.agent_modes.changed'
+          ? ['advRoster.list']
+          : [],
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    // A chatty source holds the window open: 50 presence writes, ONE fanout.
+    for (let i = 0; i < 50; i++) {
+      clock.t += 10;
+      lb.deliver(
+        JSON.stringify({ name: 'harness_shared.coord_presence.changed', args: { id: `p${i}` } }),
+      );
+    }
+    expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(1);
+
+    // The rare, meaningful write from a DIFFERENT source gets through at once,
+    // deep inside the window presence is still holding. This is the assertion
+    // that fails without the source in the dedupe key.
+    lb.deliver(
+      JSON.stringify({ name: 'harness_shared.agent_modes.changed', args: { id: 'agent-1' } }),
+    );
+    expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(2);
+
+    // ...and that source is itself still throttled: a second mode write inside
+    // the window does NOT fan out again, so WI-840's cap holds PER SOURCE and
+    // the per-name bound stays (distinct sources), never (write rate).
+    clock.t += 10;
+    lb.deliver(
+      JSON.stringify({ name: 'harness_shared.agent_modes.changed', args: { id: 'agent-2' } }),
+    );
+    expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(2);
+  });
+
   it('bridged SCOPED targets with different args are not cross-suppressed', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
