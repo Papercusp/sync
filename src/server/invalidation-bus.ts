@@ -214,10 +214,42 @@ export function createInvalidationBus(
     // under sustained multi-agent write load produced an unthrottled
     // invalidate storm: thousands of full re-fetches/hour from every live
     // subscriber, scaling with fleet write-rate rather than viewer count).
+    //
+    // The dedupe key is per (SOURCE TABLE, target name, target args) — NOT per
+    // target alone. Several source tables commonly bridge to ONE target name
+    // (advRoster.list is fed by coord_presence, agent_modes, adv_sessions and
+    // work_items), and a target-only key lets the CHATTIEST source hold that
+    // shared window continuously, silently swallowing every other source's
+    // events. Measured 2026-08-09 (WI-37446): a mode written to
+    // harness_shared.agent_modes took 90s to reach the UI because coord_presence
+    // — ~1999 writes/10min against the same advRoster.list key — never let the
+    // window lapse, so the chat mode pill showed a stale CONTRACT for a minute
+    // and a half while the database was already correct.
+    //
+    // Keying by source restores per-source leading-edge delivery (a rare but
+    // meaningful write is never hidden behind a hot neighbour) and keeps
+    // WI-840's cap exactly as designed: each source still fans out at most once
+    // per window per target, so the per-name bound moves from 1 to (number of
+    // DISTINCT source tables bridged to that name) — a small static constant
+    // read off the bridge map, never a function of write rate. Write rate is
+    // what made WI-840 a storm; a static fan-in factor is not.
+    //
+    // ⚠ The source NAME only — never the source's ARGS. The trigger payload
+    // carries the changed row's PK, so folding args in would make every row
+    // write a unique key and disable bridged dedupe entirely, restoring the
+    // exact storm this exists to prevent. Guarded by the "bridged full-bust
+    // targets dedupe within the window" test, which fires three DIFFERENT row
+    // ids and requires a single fanout.
+    //
+    // The `bridge:` prefix namespaces these away from notifyInvalidate()'s
+    // `name|args|dataHash` keys, so a bridged target and an explicit app-code
+    // invalidate of the SAME query name cannot collide in recentNotifies —
+    // the same reasoning one layer out: a chatty trigger must not be able to
+    // swallow an explicit invalidate either.
     for (const target of bridge(parsed.name, ev.args)) {
       const name = typeof target === 'string' ? target : target.name;
       const targetArgs = typeof target === 'string' ? undefined : target.args;
-      const key = `${name}|${targetArgs ? JSON.stringify(targetArgs) : ''}|`;
+      const key = `bridge:${parsed.name}|${name}|${targetArgs ? JSON.stringify(targetArgs) : ''}|`;
       if (!shouldFanout(key, ev.ts, dedupeWindowMs)) continue;
       const bridged: SyncEvent = { id: nextId++, ts: ev.ts, name };
       if (targetArgs !== undefined) bridged.args = targetArgs;
