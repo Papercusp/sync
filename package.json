@@ -28,12 +28,14 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@papercusp/test-config": "*",
     "@tanstack/react-query": "^5.75.0"
   },
   "peerDependencies": {
     "@papercusp/sse": "*",
     "react": ">=19.0.0",
     "react-dom": ">=19.0.0"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*"
   }
 }
