@@ -177,19 +177,29 @@ const UNKNOWN_QUERY_NAME_PREFIX = 'unknown queryName: ';
 async function describeHttpError(
   res: Response,
   name: string,
-): Promise<{ message: string; unknownQueryName: boolean }> {
+): Promise<{ message: string; unknownQueryName: boolean; staleOperator: boolean }> {
   let detail = '';
   let unknownQueryName = false;
+  let staleOperator = false;
   try {
-    const body = (await res.json()) as { error?: string } | null;
+    const body = (await res.json()) as {
+      error?: string;
+      code?: string;
+      staleOperator?: boolean;
+    } | null;
     if (body?.error) {
       detail = ` — ${body.error}`;
       unknownQueryName = res.status === 400 && body.error.startsWith(UNKNOWN_QUERY_NAME_PREFIX);
+      staleOperator = body.code === 'stale_operator_module_link' || body.staleOperator === true;
     }
   } catch {
     // Non-JSON error body: the status alone is the diagnosis.
   }
-  return { message: `sync query "${name}" failed: HTTP ${res.status}${detail}`, unknownQueryName };
+  return {
+    message: `sync query "${name}" failed: HTTP ${res.status}${detail}`,
+    unknownQueryName,
+    staleOperator,
+  };
 }
 
 /**
@@ -314,12 +324,12 @@ export function getQueryFetcher(
       // ANY HTTP response (error statuses included) proves the origin is up.
       reportSyncReachable();
       if (!res.ok) {
-        const { message, unknownQueryName } = await describeHttpError(res, name);
+        const { message, unknownQueryName, staleOperator } = await describeHttpError(res, name);
         // WI-5956: this specific shape means the origin is reachable but running
         // OLDER code than this (freshly-rebuilt) client — a version-skew bug, not
         // a per-query fluke. Surface it app-wide (StaleOperatorIndicator) instead
         // of letting it read as one silently-broken panel.
-        if (unknownQueryName) reportSyncStaleOperator(name);
+        if (unknownQueryName || staleOperator) reportSyncStaleOperator(name);
         throw new Error(message);
       }
       // text-then-parse rather than res.json(): `json()` decodes to a string

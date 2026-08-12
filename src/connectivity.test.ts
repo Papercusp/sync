@@ -170,6 +170,31 @@ describe('query-fetcher connectivity reporting', () => {
 });
 
 describe('query-fetcher stale-operator reporting (WI-5956)', () => {
+  it('reports stale-operator for a diagnosed module-link failure on HTTP 500', async () => {
+    const { getQueryFetcher } = await import('./transports/polling/query-fetcher');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error:
+              'sync query "agentDetail.byOwner" failed because this operator may be running stale code after a module change. Restart the operator process and retry.',
+            name: 'agentDetail.byOwner',
+            code: 'stale_operator_module_link',
+            staleOperator: true,
+          }),
+          { status: 500 },
+        ),
+      ),
+    );
+    const fetcher = getQueryFetcher('/stale-test-module-link');
+    await expect(fetcher('agentDetail.byOwner', {})).rejects.toThrow(/Restart the operator process/);
+    expect(getSyncStaleOperator()).toEqual({ stale: true, queryNames: ['agentDetail.byOwner'] });
+    expect(getSyncConnectivity().offline).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
   it('reports stale-operator on the exact "unknown queryName" 400 shape rest-query.ts uses', async () => {
     const { getQueryFetcher } = await import('./transports/polling/query-fetcher');
     vi.stubGlobal(
