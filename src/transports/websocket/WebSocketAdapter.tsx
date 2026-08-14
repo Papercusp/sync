@@ -7,6 +7,7 @@ import { SyncContext } from '../../SyncContext';
 import { createUseWebSocketQuery } from './useWebSocketQuery';
 import { clearPollingCache } from '../polling/queryClient';
 import type { SyncType } from '../../types';
+import { normalizeDemoPrincipal } from '../../principal';
 
 interface WebSocketAdapterProps {
   children: ReactNode;
@@ -92,6 +93,7 @@ function WebSocketAdapter({
   mutators,
   kvStore = 'idb',
 }: WebSocketAdapterProps) {
+  const principal = normalizeDemoPrincipal(userId);
   const zeroServer = server ?? resolveDefaultZeroServer();
   const cacheKey = `${userId}|${zeroServer}|${kvStore}`;
   const zeroRef = useRef<Zero<any> | null>(null);
@@ -229,13 +231,14 @@ function WebSocketAdapter({
   const ctxValue = useMemo(
     () => ({
       transport: 'WEBSOCKETS' as SyncType,
+      principal,
       useDataImpl,
       prefetch: noop,
       // Zero's namespaced custom-mutator dispatcher — drives optimistic writes
       // via useSyncMutate. Stable for the life of the cached Zero instance.
       mutate: (zeroRef.current?.mutate ?? null) as Record<string, Record<string, (a: any) => Promise<unknown>>> | null,
     }),
-    [useDataImpl, noop],
+    [principal, useDataImpl, noop],
   );
 
   return (

@@ -2,9 +2,11 @@
 
 import { createContext, useCallback, useContext } from 'react';
 import type { SyncType, UseDataImpl, SyncQueryResult, SyncQueryOptions, PrefetchSyncFn, MutateImpl } from './types';
+import type { DemoPrincipal } from './principal';
 
 interface SyncContextValue {
   transport: SyncType;
+  principal: DemoPrincipal;
   useDataImpl: UseDataImpl;
   prefetch: PrefetchSyncFn;
   /** Zero custom-mutator dispatcher (WS only); absent ⇒ writes use the REST fallback. */
@@ -17,6 +19,11 @@ export function useSyncContext(): SyncContextValue {
   const ctx = useContext(SyncContext);
   if (!ctx) throw new Error('useSyncQuery must be used within a <SyncProvider>');
   return ctx;
+}
+
+/** Current selected demo principal, or null for an explicitly public scope. */
+export function useSyncPrincipal(): DemoPrincipal {
+  return useSyncContext().principal;
 }
 
 /**

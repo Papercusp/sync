@@ -3,7 +3,12 @@ export type SyncType = 'WEBSOCKETS' | 'SSE' | 'POLLING';
 export interface SyncProviderProps {
   syncType?: SyncType;
   children: React.ReactNode;
-  /** User ID for the sync connection. */
+  /**
+   * Selected demo principal for every sync transport. Polling sends it as the
+   * canonical principal header; SSE sends it as the matching query parameter;
+   * WebSockets use it as Zero's userID. Omit only for intentionally public
+   * queries.
+   */
   userId?: string;
   /** Server URL for Zero (WS mode) or REST endpoint base (polling mode). */
   server?: string;
