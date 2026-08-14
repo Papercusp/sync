@@ -86,8 +86,10 @@ export function useSyncMutate<A = unknown, R = unknown>(
       if (fn) return (await fn(args)) as R;
       return restFallback(args);
     },
-    // path is constant per call site; restFallback expected stable.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mutate, path],
+    // A fallback can be stable for one render while still changing when its
+    // route inputs change (for example, switching from one event room to
+    // another). Keeping it in the dependency list prevents writes from using
+    // the first render's URL after the caller has moved to a new entity.
+    [mutate, path, restFallback],
   );
 }
