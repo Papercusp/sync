@@ -23,7 +23,7 @@ export function useSyncContext(): SyncContextValue {
 
 /** Current selected demo principal, or null for an explicitly public scope. */
 export function useSyncPrincipal(): DemoPrincipal {
-  return useSyncContext().principal;
+  return useContext(SyncContext)?.principal ?? null;
 }
 
 /**
