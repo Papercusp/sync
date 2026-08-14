@@ -70,6 +70,12 @@ import {
 } from '../polling/usePollingQuery';
 import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
 import type { SyncType } from '../../types';
+import {
+  appendDemoPrincipalQuery,
+  normalizeDemoPrincipal,
+  syncQueryKey,
+  type DemoPrincipal,
+} from '../../principal';
 
 interface SSEAdapterProps {
   children: ReactNode;
@@ -108,12 +114,14 @@ function SSESubscriber({
   tokenQueryParam,
   endpointOverride,
   visibilityPause,
+  principal,
 }: {
   endpoint: string;
   onError?: (e: Error) => void;
   tokenQueryParam?: string;
   endpointOverride?: string;
   visibilityPause?: boolean;
+  principal: DemoPrincipal;
 }) {
   const queryClient = useQueryClient();
 
@@ -123,9 +131,10 @@ function SSESubscriber({
 
     // Build the SSE URL once; both the initial open and reconnects use it.
     const baseUrl = endpointOverride ?? `${endpoint}/sse`;
-    const sseUrl = tokenQueryParam
+    const authenticatedUrl = tokenQueryParam
       ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenQueryParam)}`
       : baseUrl;
+    const sseUrl = appendDemoPrincipalQuery(authenticatedUrl, principal);
 
     // Resilience (jitter, zombie watchdog, backoff, escalation, visibility
     // pause) lives in @papercusp/sse's createResilientEventSource. This
@@ -152,27 +161,29 @@ function SSESubscriber({
           const upd = ev as UpdateEvent;
           const cacheValue = { rows: upd.data, version: String(Date.now()) };
           if (upd.args) {
-            queryClient.setQueryData(['sync', upd.name, upd.args], cacheValue);
+            queryClient.setQueryData(syncQueryKey(principal, upd.name, upd.args), cacheValue);
           } else {
             queryClient.setQueriesData(
               {
                 predicate: (q) =>
                   Array.isArray(q.queryKey) &&
                   q.queryKey[0] === 'sync' &&
-                  q.queryKey[1] === upd.name,
+                  q.queryKey[1] === principal &&
+                  q.queryKey[2] === upd.name,
               },
               cacheValue,
             );
           }
         } else {
           if (ev.args) {
-            queryClient.invalidateQueries({ queryKey: ['sync', ev.name, ev.args] });
+            queryClient.invalidateQueries({ queryKey: syncQueryKey(principal, ev.name, ev.args) });
           } else {
             queryClient.invalidateQueries({
               predicate: (q) =>
                 Array.isArray(q.queryKey) &&
                 q.queryKey[0] === 'sync' &&
-                q.queryKey[1] === ev.name,
+                q.queryKey[1] === principal &&
+                q.queryKey[2] === ev.name,
             });
           }
         }
@@ -218,13 +229,14 @@ function SSESubscriber({
       syncMetrics.sseDisconnected();
       source.close();
     };
-  }, [endpoint, queryClient, onError, tokenQueryParam, endpointOverride, visibilityPause]);
+  }, [endpoint, queryClient, onError, tokenQueryParam, endpointOverride, visibilityPause, principal]);
 
   return null;
 }
 
 export function SSEAdapter({
   children,
+  userId,
   restEndpoint,
   server,
   pollIntervalMs = 10_000,
@@ -234,6 +246,7 @@ export function SSEAdapter({
   visibilityPause,
 }: SSEAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
+  const principal = normalizeDemoPrincipal(userId);
   const queryClient = getQueryClient();
 
   const useDataImpl = useMemo(
@@ -242,22 +255,23 @@ export function SSEAdapter({
         restEndpoint: endpoint,
         defaultPollIntervalMs: pollIntervalMs,
         tokenQueryParam,
+        principal,
       }),
-    [endpoint, pollIntervalMs, tokenQueryParam],
+    [endpoint, pollIntervalMs, principal, tokenQueryParam],
   );
 
   const prefetch = useMemo(
     () =>
       createPrefetchSync(
-        { restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam },
+        { restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, principal },
         queryClient,
       ),
-    [endpoint, pollIntervalMs, tokenQueryParam, queryClient],
+    [endpoint, pollIntervalMs, principal, tokenQueryParam, queryClient],
   );
 
   const ctxValue = useMemo(
-    () => ({ transport: 'SSE' as SyncType, useDataImpl, prefetch }),
-    [useDataImpl, prefetch],
+    () => ({ transport: 'SSE' as SyncType, principal, useDataImpl, prefetch }),
+    [principal, useDataImpl, prefetch],
   );
 
   return (
@@ -269,6 +283,7 @@ export function SSEAdapter({
           tokenQueryParam={tokenQueryParam}
           endpointOverride={endpointOverride}
           visibilityPause={visibilityPause}
+          principal={principal}
         />
         {children}
       </SyncContext.Provider>

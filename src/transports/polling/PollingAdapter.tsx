@@ -6,6 +6,7 @@ import { SyncContext } from '../../SyncContext';
 import { getQueryClient } from './queryClient';
 import { createUsePollingQuery, createPrefetchSync } from './usePollingQuery';
 import type { SyncType } from '../../types';
+import { normalizeDemoPrincipal } from '../../principal';
 
 interface PollingAdapterProps {
   children: ReactNode;
@@ -43,28 +44,30 @@ function warnIfDefaultUsedInProd(endpoint: string): void {
 
 export function PollingAdapter({
   children,
+  userId,
   restEndpoint,
   server,
   pollIntervalMs = 10_000,
   tokenQueryParam,
 }: PollingAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
+  const principal = normalizeDemoPrincipal(userId);
   warnIfDefaultUsedInProd(endpoint);
   const queryClient = getQueryClient();
 
   const useDataImpl = useMemo(
-    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam }),
-    [endpoint, pollIntervalMs, tokenQueryParam],
+    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, principal }),
+    [endpoint, pollIntervalMs, principal, tokenQueryParam],
   );
 
   const prefetch = useMemo(
-    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam }, queryClient),
-    [endpoint, pollIntervalMs, tokenQueryParam, queryClient],
+    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, principal }, queryClient),
+    [endpoint, pollIntervalMs, principal, tokenQueryParam, queryClient],
   );
 
   const ctxValue = useMemo(
-    () => ({ transport: 'POLLING' as SyncType, useDataImpl, prefetch }),
-    [useDataImpl, prefetch],
+    () => ({ transport: 'POLLING' as SyncType, principal, useDataImpl, prefetch }),
+    [principal, useDataImpl, prefetch],
   );
 
   return (

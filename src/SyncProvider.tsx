@@ -6,6 +6,7 @@ import { PollingAdapter } from './transports/polling/PollingAdapter';
 import { useTransportFallback } from './fallback/useTransportFallback';
 import { WebSocketErrorBoundary } from './fallback/WebSocketErrorBoundary';
 import { SyncContext } from './SyncContext';
+import { normalizeDemoPrincipal } from './principal';
 import type { SyncProviderProps, SyncQueryResult, SyncType } from './types';
 
 /**
@@ -23,9 +24,11 @@ import type { SyncProviderProps, SyncQueryResult, SyncType } from './types';
 function PendingSyncAdapter({
   children,
   transport,
+  principal,
 }: {
   children: ReactNode;
   transport: SyncType;
+  principal: string | null;
 }) {
   const value = useMemo(() => {
     const emptyResult: SyncQueryResult<unknown> = {
@@ -38,10 +41,11 @@ function PendingSyncAdapter({
     };
     return {
       transport,
+      principal,
       useDataImpl: <T,>(_opts: unknown) => emptyResult as SyncQueryResult<T>,
       prefetch: () => {},
     };
-  }, [transport]);
+  }, [principal, transport]);
   return <SyncContext.Provider value={value}>{children}</SyncContext.Provider>;
 }
 
@@ -210,6 +214,7 @@ export function SyncProvider({
   mutators,
   kvStore,
 }: SyncProviderProps) {
+  const principal = normalizeDemoPrincipal(userId);
   const { activeTransport, onTransportError } = useTransportFallback({
     preferred: syncType,
     fallbackDelayMs,
@@ -299,7 +304,7 @@ export function SyncProvider({
   // If we are NOT in WS mode (POLLING / SSE preferred, or fallback triggered)
   // we never probe and wsHealthy stays false, so this branch is never taken.
   if (syncType === 'WEBSOCKETS' && activeTransport === 'WEBSOCKETS' && wsHealthy === null) {
-    return <PendingSyncAdapter transport="WEBSOCKETS">{children}</PendingSyncAdapter>;
+    return <PendingSyncAdapter transport="WEBSOCKETS" principal={principal}>{children}</PendingSyncAdapter>;
   }
 
   // SSR pass and first client render: render the empty passthrough so the
@@ -307,7 +312,7 @@ export function SyncProvider({
   // Avoids hydration mismatches from lazy() suspending differently on the
   // server vs the client.
   if (!mounted) {
-    return <PendingSyncAdapter transport={syncType}>{children}</PendingSyncAdapter>;
+    return <PendingSyncAdapter transport={syncType} principal={principal}>{children}</PendingSyncAdapter>;
   }
 
   // SSE primary path — used by desktop/operator deployments. The SSEAdapter
@@ -317,7 +322,7 @@ export function SyncProvider({
   if (syncType === 'SSE' && activeTransport === 'SSE') {
     return (
       <Suspense fallback={
-        <PendingSyncAdapter transport="SSE">{children}</PendingSyncAdapter>
+        <PendingSyncAdapter transport="SSE" principal={principal}>{children}</PendingSyncAdapter>
       }>
         <LazySSEAdapter key="sse" {...commonProps}>
           {children}

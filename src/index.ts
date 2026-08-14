@@ -1,5 +1,13 @@
 export { SyncProvider } from './SyncProvider';
-export { useSyncQuery, useSyncMutate, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
+export { useSyncQuery, useSyncMutate, useSyncPrefetch, useSyncContext, useSyncPrincipal, SyncContext } from './SyncContext';
+export {
+  DEMO_PRINCIPAL_HEADER,
+  DEMO_PRINCIPAL_QUERY_PARAM,
+  appendDemoPrincipalQuery,
+  normalizeDemoPrincipal,
+  syncQueryKey,
+  type DemoPrincipal,
+} from './principal';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';

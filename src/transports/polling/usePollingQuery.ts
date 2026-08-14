@@ -1,8 +1,9 @@
 'use client';
 
-import { keepPreviousData, useQuery, type QueryClient } from '@tanstack/react-query';
+import { useQuery, type QueryClient } from '@tanstack/react-query';
 import { useCallback, useRef } from 'react';
 import type { SyncQueryOptions, SyncQueryResult } from '../../types';
+import { normalizeDemoPrincipal, syncQueryKey } from '../../principal';
 import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
 import { getBatchFetcher } from './batch-fetcher';
 
@@ -16,6 +17,7 @@ interface PollingConfig {
    * bare `fetch` and can't carry Authorization headers.
    */
   tokenQueryParam?: string;
+  principal?: string | null;
 }
 
 // Stable singleton empty array so consumers that depend on `data` reference
@@ -29,7 +31,8 @@ export function createUsePollingQuery(config: PollingConfig) {
   // hydration, poll tick, SSE-invalidate wave) coalesces into a single
   // `POST /rest-query-batch` instead of ~40 parallel `GET`s that would
   // exhaust the browser's 6-connection-per-host HTTP/1.1 cap.
-  const batchFetch = getBatchFetcher(config.restEndpoint, config.tokenQueryParam);
+  const principal = normalizeDemoPrincipal(config.principal);
+  const batchFetch = getBatchFetcher(config.restEndpoint, config.tokenQueryParam, principal);
 
   return function usePollingQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
     const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime } = opts;
@@ -43,14 +46,19 @@ export function createUsePollingQuery(config: PollingConfig) {
     const queryFn = useCallback(() => {
       syncMetrics.cacheMiss();
       return batchFetch(queryName, JSON.parse(argsKey));
-    }, [queryName, argsKey]);
+    }, [batchFetch, queryName, argsKey]);
 
     const { data, isLoading, isFetching, isPlaceholderData, error, refetch } = useQuery({
-      queryKey: ['sync', queryName, args],
+      queryKey: syncQueryKey(principal, queryName, args),
       queryFn,
       refetchInterval: interval,
       enabled,
-      placeholderData: keepPreviousData,
+      // Keep placeholder data only within the same principal. TanStack's
+      // unconditional keepPreviousData crosses query-key changes and briefly
+      // rendered the previous demo user's private rows during impersonation.
+      placeholderData: (previousData, previousQuery) => (
+        previousQuery?.queryKey[1] === principal ? previousData : undefined
+      ),
       ...(staleTime !== undefined ? { staleTime } : {}),
     });
 
@@ -87,11 +95,12 @@ export function createUsePollingQuery(config: PollingConfig) {
 }
 
 export function createPrefetchSync(config: PollingConfig, queryClient: QueryClient) {
-  const batchFetch = getBatchFetcher(config.restEndpoint, config.tokenQueryParam);
+  const principal = normalizeDemoPrincipal(config.principal);
+  const batchFetch = getBatchFetcher(config.restEndpoint, config.tokenQueryParam, principal);
   return function prefetchSync(opts: SyncQueryOptions) {
     const { queryName, args = {} } = opts;
     void queryClient.prefetchQuery({
-      queryKey: ['sync', queryName, args],
+      queryKey: syncQueryKey(principal, queryName, args),
       queryFn: () => batchFetch(queryName, args),
       staleTime: 30_000,
     });
