@@ -13,11 +13,19 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.75.0"
+    "@tanstack/react-query": "^5.75.0",
+    "@tanstack/react-virtual": "^3.13.23",
+    "@tanstack/virtual-core": "^3.13.23"
   },
   "peerDependencies": {
     "@papercusp/sse": "*",
+    "@rocicorp/zero": "^1.3.0",
     "react": ">=19.0.0",
     "react-dom": ">=19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@rocicorp/zero": {
+      "optional": true
+    }
   }
 }
