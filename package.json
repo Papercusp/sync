@@ -1,0 +1,41 @@
+{
+  "name": "@papercusp/sync",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Schema-agnostic Zero + SSE sync transports with reconnect/backpressure handling.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./server": {
+      "types": "./src/server/index.ts",
+      "import": "./src/server/index.ts",
+      "default": "./src/server/index.ts"
+    },
+    "./server/pg": {
+      "types": "./src/server/pg-adapter.ts",
+      "import": "./src/server/pg-adapter.ts",
+      "default": "./src/server/pg-adapter.ts"
+    }
+  },
+  "sideEffects": false,
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.75.0"
+  },
+  "peerDependencies": {
+    "@papercusp/sse": "*",
+    "react": ">=19.0.0",
+    "react-dom": ">=19.0.0"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*"
+  }
+}
