@@ -1,25 +1,36 @@
 'use client';
 
 /**
- * SSE Transport — desktop's PRIMARY push transport.
+ * SSE Transport — SideStage's PRIMARY push transport in the deployed stack.
  *
- * Status (2026-05-11): production. The shipping desktop app (Tauri) mounts
- * this adapter via `syncType="SSE"` in HarnessZeroProvider whenever
- * runtime === 'tauri' (detected via `__TAURI_INTERNALS__` +
- * `/api/desktop/version` fingerprint). The server endpoint
- * `apps/operator/app/api/zero-harness/sse/route.ts` emits invalidate /
- * update / heartbeat events backed by PG LISTEN/NOTIFY. Resilience knobs
- * (jitter, zombie watchdog, heartbeat handling, Last-Event-ID-ready) are
- * load-bearing in production.
+ * Status (2026-08-17): production. The web app at sidestage.papercusp.com IS
+ * the production user surface (alongside mobile v1.0.0). It mounts
+ * `SyncProvider` with `syncType="WEBSOCKETS"` (`apps/web/src/main.tsx:41`),
+ * but that names a PREFERENCE, not the active rung: the up-front WS handshake
+ * probe only succeeds when a zero-cache is listening at the configured origin
+ * (`${window.location.origin}/zero` in a deployed build). Nothing serves that
+ * origin today, so the probe fails within WS_PROBE_MS and every client steps
+ * down to this adapter (`SyncProvider.tsx:296-299`). SSE therefore carries
+ * real user traffic, and its resilience knobs (jitter, zombie watchdog,
+ * heartbeat handling, Last-Event-ID-ready) are load-bearing in production.
  *
- * Browser (test / dev) defaults to Zero WS; SSE acts as a fallback there
- * via useTransportFallback when WS fails. The webapp is not the production
- * user surface — see /CLAUDE.md "Deployment model".
+ * The server endpoint is the API's `@Sse('sse')` route
+ * (`apps/api/src/sync/sync.controller.ts:65`).
  *
  * Earlier header for archival: an older doc-comment (2026-05-06) called this
- * adapter "preserved-but-frozen" alongside libs/sync/PASS_2_1_DECISION.md.
- * That stance was reversed 2026-05-07 when desktop committed to SSE as
- * primary; PASS_2_1_DECISION.md now carries a SUPERSEDED banner.
+ * adapter "preserved-but-frozen" alongside libs/sync/PASS_2_1_DECISION.md;
+ * that stance was reversed when SSE became the transport actually serving
+ * users. PASS_2_1_DECISION.md now carries a SUPERSEDED banner.
+ *
+ * NOTE (2026-08-17): the previous header was BORROWED papercusp text and was
+ * wrong for this repo in every deployment particular — it described a Tauri
+ * desktop app mounting `syncType="SSE"` via HarnessZeroProvider, cited
+ * `apps/operator/app/api/zero-harness/sse/route.ts`, and pointed at
+ * /CLAUDE.md "Deployment model" to claim the webapp is NOT the production
+ * surface. None of those exist here: `apps/` holds only `api` and `web`,
+ * there is no CLAUDE.md anywhere in the tree, and `__TAURI_INTERNALS__`
+ * appeared nowhere but in that comment. Verified against the tree, and the
+ * surface question ruled by the fleet leader, 2026-08-17 (D-006 item 7).
  *
  * Same fetcher as PollingAdapter (react-query against `${endpoint}/rest-query`)
  * plus an EventSource subscribed to `${endpoint}/sse` that pushes invalidation
