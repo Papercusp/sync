@@ -33,6 +33,13 @@ function PendingSyncAdapter({
       transport,
       invalidate: () => {},
       error: null,
+      // No adapter is mounted yet, so no attempt has been made — let alone
+      // failed. Zero is the honest reading here, and it keeps a consumer's
+      // `failureCount > 0` branch (the "failing and retrying" copy) correctly
+      // silent during this pre-mount window rather than accusing a read that
+      // has not run.
+      failureCount: 0,
+      failureReason: null,
     };
     return {
       transport,
