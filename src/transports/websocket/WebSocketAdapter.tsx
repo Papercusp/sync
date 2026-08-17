@@ -67,6 +67,44 @@ function resolveDefaultZeroServer(): string {
 
 const PROBE_TIMEOUT_MS = 10_000;
 
+/**
+ * Connection states Zero will NOT retry out of on its own. Each is a
+ * definitive verdict on the WebSocket rung, so the ladder must step down as
+ * soon as we see one rather than waiting out `PROBE_TIMEOUT_MS` — the same
+ * reasoning SyncProvider applies to a failed up-front probe.
+ *
+ * - `error`      — fatal; no retries until `connect()` is called.
+ * - `needs-auth` — the upgrade was ACCEPTED and the session then rejected
+ *                  (expired/invalid token, or a zero-cache userID mismatch).
+ *                  An auth rejection lands HERE, not in `error`. Missing it is
+ *                  what let a reachable-but-unauthorized server leave every
+ *                  named query resolving empty forever behind an
+ *                  authoritative-looking "0" with no error surface at all
+ *                  (EI-20706847951836003).
+ * - `closed`     — `zero.close()`; a new Zero instance is required to reconnect.
+ *
+ * `connecting` / `disconnected` are deliberately absent: they are Zero's
+ * normal retry states, and demoting on arrival would cost the WS rung on every
+ * slow hydration. The timeout below is what catches one that never settles.
+ */
+const TERMINAL_CONNECTION_STATES = new Set(['error', 'needs-auth', 'closed']);
+
+/**
+ * Render a connection state's `reason` for the fallback log. It is a plain
+ * string on `error`/`closed`/`disconnected`, but a structured object on
+ * `needs-auth` (`{type:'mutate'|'query', status} | {type:'zero-cache', reason}`),
+ * where a bare template interpolation would print "[object Object]" and throw
+ * away the only diagnostic the operator gets.
+ */
+function describeConnectionReason(reason: unknown): string {
+  if (typeof reason === 'string') return reason;
+  if (reason && typeof reason === 'object') {
+    const r = reason as { type?: string; status?: number; reason?: string; body?: string };
+    return [r.type, r.status, r.reason ?? r.body].filter(Boolean).join(' ');
+  }
+  return 'unknown';
+}
+
 // Module-level cache of Zero instances keyed by (userId|server). Survives
 // component remounts caused by Suspense, lazy-chunk-loading, transport-fallback
 // toggling, or astro ClientRouter page transitions.
@@ -193,12 +231,14 @@ function WebSocketAdapter({
     // the callback fires synchronously during subscribe().
     let timer: ReturnType<typeof setTimeout>;
 
-    // Path 1: subscribe to 'error' state (JS-level WS override that throws).
-    // Also cancel the Path 2 timer once we see 'connected' so a slow initial
-    // hydration doesn't trigger a false fallback.
+    // Path 1: subscribe for a TERMINAL connection state — one Zero will not
+    // retry out of (see TERMINAL_CONNECTION_STATES). Also cancel the Path 2
+    // timer once we see 'connected' so a slow initial hydration doesn't
+    // trigger a false fallback.
     const unsub = z.connection.state.subscribe((s) => {
-      if (s.name === 'error') {
-        trigger(`Zero connection error: ${(s as { reason?: string }).reason ?? 'unknown'}`);
+      if (TERMINAL_CONNECTION_STATES.has(s.name)) {
+        const reason = describeConnectionReason((s as { reason?: unknown }).reason);
+        trigger(`Zero connection ${s.name}: ${reason}`);
       } else if (s.name === 'connected') {
         // WS is genuinely up — cancel the timeout probe.
         clearTimeout(timer);
