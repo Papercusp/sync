@@ -37,7 +37,13 @@ export function useSyncContext(): SyncContextValue {
 export function useSyncQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
   const ctx = useContext(SyncContext);
   if (!ctx) {
-    return { data: undefined, loading: false, error: null } as unknown as SyncQueryResult<T>;
+    return {
+      data: undefined,
+      loading: false,
+      error: null,
+      failureCount: 0,
+      failureReason: null,
+    } as unknown as SyncQueryResult<T>;
   }
   // (Hook-after-branch matches the existing useDataImpl pattern: ctx presence
   // is stable for the life of the mount.)
