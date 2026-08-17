@@ -24,7 +24,19 @@ describe('getQueryClient', () => {
     expect(q.refetchOnWindowFocus).toBe(false);
     expect(q.structuralSharing).toBe(true);
     // The reactivity contract: must include every prop usePollingQuery reads.
-    expect(q.notifyOnChangeProps).toEqual(['data', 'error', 'isLoading', 'isFetching', 'isPlaceholderData']);
+    // failureCount/failureReason joined the list when usePollingQuery began
+    // returning them (WI-39675) — they are what lets a consumer tell "loading"
+    // apart from "silently retrying a failing load", and a prop that is read but
+    // NOT listed here simply never re-renders, i.e. reports a frozen zero.
+    expect(q.notifyOnChangeProps).toEqual([
+      'data',
+      'error',
+      'isLoading',
+      'isFetching',
+      'isPlaceholderData',
+      'failureCount',
+      'failureReason',
+    ]);
   });
 });
 
