@@ -20,7 +20,20 @@ export function getQueryClient(): QueryClient {
           // data still flips dataUpdatedAt and fans out a render to every
           // subscriber. Listed flags must include every property usePollingQuery
           // reads from useQuery's return.
-          notifyOnChangeProps: ['data', 'error', 'isLoading', 'isFetching', 'isPlaceholderData'],
+          // `failureCount`/`failureReason` are listed because usePollingQuery
+          // now returns them: they are the ONLY signal that separates "loading"
+          // from "silently retrying a failing load" (see SyncQueryResult), and
+          // omitting them here would leave a consumer subscribed to a value that
+          // never re-renders — a stale zero, which is worse than not exposing it.
+          notifyOnChangeProps: [
+            'data',
+            'error',
+            'isLoading',
+            'isFetching',
+            'isPlaceholderData',
+            'failureCount',
+            'failureReason',
+          ],
         },
       },
     });

@@ -89,7 +89,7 @@ export function createUsePollingQuery(config: PollingConfig) {
       [queryName, argsKey],
     );
 
-    const { data, isLoading, isFetching, isPlaceholderData, error, refetch } = useQuery({
+    const { data, isLoading, isFetching, isPlaceholderData, error, refetch, failureCount, failureReason } = useQuery({
       // The raw args object is safe here: TanStack v5 hashes query keys
       // structurally (sorted keys), so content-equal args from non-memoized
       // callers map to the same query — no refetch churn (pinned by
@@ -135,6 +135,8 @@ export function createUsePollingQuery(config: PollingConfig) {
       transport: 'POLLING',
       invalidate,
       error: error as Error | null,
+      failureCount,
+      failureReason: (failureReason ?? null) as Error | null,
     };
   };
 }

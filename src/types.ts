@@ -187,6 +187,30 @@ export interface SyncQueryResult<T = any> {
   invalidate: () => void;
   /** Error from the last fetch attempt, if any. */
   error: Error | null;
+  /**
+   * How many consecutive fetch attempts have FAILED for the current load
+   * (0 while healthy; reset on success).
+   *
+   * ⚠ This is the only way a consumer can tell "still loading" apart from
+   * "loading has been failing and silently retrying". `loading` is TanStack's
+   * `isLoading` (= `isPending && isFetching`), which stays TRUE for the whole
+   * retry sequence, while `error` stays NULL until every retry is exhausted —
+   * so a query whose every attempt times out renders as an ordinary,
+   * indistinguishable spinner for the full retry budget. With the default 3
+   * retries, exponential backoff (1s/2s/4s) and a 10s server-side timeout, that
+   * is ~47 SECONDS of a UI claiming it is simply "loading".
+   *
+   * That is not hypothetical: it is what made the Learning tab's Retain pane
+   * appear to load "forever" (WI-39675). Any pane with a bare `loading` branch
+   * should read this and say something honest once it is > 0.
+   */
+  failureCount: number;
+  /**
+   * The error from the most recent FAILED attempt, even while retries are still
+   * in flight — i.e. populated in exactly the window where `error` is still
+   * null. Null while healthy.
+   */
+  failureReason: Error | null;
 }
 
 /** Internal: the hook implementation injected by each transport adapter. */
