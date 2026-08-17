@@ -44,6 +44,10 @@ const EMPTY: SyncQueryResult<Row> = {
   transport: 'POLLING',
   invalidate: () => {},
   error: null,
+  // Part of the result contract (WI-39675 D-004) — no attempt has failed for an
+  // empty/unrouted query.
+  failureCount: 0,
+  failureReason: null,
 };
 
 /**

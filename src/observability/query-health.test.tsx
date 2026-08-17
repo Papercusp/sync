@@ -21,6 +21,12 @@ function res(over: Partial<SyncQueryResult<unknown>> = {}): SyncQueryResult<unkn
     transport: 'SSE',
     invalidate: () => {},
     error: null,
+    // Part of the result contract (WI-39675 D-004): a consumer distinguishes
+    // "still working" from "failing and retrying" by these, so a fixture that
+    // omitted them would let a health observer be written against a shape no
+    // real transport returns.
+    failureCount: 0,
+    failureReason: null,
     ...over,
   };
 }
