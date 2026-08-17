@@ -281,8 +281,8 @@ export function SSEAdapter({
   );
 
   const ctxValue = useMemo(
-    () => ({ transport: 'SSE' as SyncType, principal, useDataImpl, prefetch }),
-    [principal, useDataImpl, prefetch],
+    () => ({ transport: 'SSE' as SyncType, principal, useDataImpl, prefetch, restEndpoint: endpoint, tokenQueryParam }),
+    [principal, useDataImpl, prefetch, endpoint, tokenQueryParam],
   );
 
   return (

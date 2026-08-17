@@ -9,6 +9,16 @@ interface SyncContextValue {
   principal: DemoPrincipal;
   useDataImpl: UseDataImpl;
   prefetch: PrefetchSyncFn;
+  /**
+   * Resolved REST base for this provider (`${server}/zero` unless overridden).
+   * Every adapter sets it — including the WebSocket one, which never uses it
+   * for its own reads but must expose it so `useRestSyncQuery` can force the
+   * REST path for names the Zero registry deliberately has no leaf for
+   * (WI-39772). Absent only in the SSR/probe placeholder provider.
+   */
+  restEndpoint?: string;
+  /** Token appended as `?token=` to REST fetches, when the provider uses one. */
+  tokenQueryParam?: string;
   /** Zero custom-mutator dispatcher (WS only); absent ⇒ writes use the REST fallback. */
   mutate?: MutateImpl | null;
 }

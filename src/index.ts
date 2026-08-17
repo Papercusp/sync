@@ -8,6 +8,7 @@ export {
   syncQueryKey,
   type DemoPrincipal,
 } from './principal';
+export { useRestSyncQuery } from './useRestSyncQuery';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export { syncMetrics, installSyncMetricsGlobal } from './observability/metrics';

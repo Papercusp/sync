@@ -5,7 +5,8 @@ import { Zero } from '@rocicorp/zero';
 import { ZeroProvider } from '@rocicorp/zero/react';
 import { SyncContext } from '../../SyncContext';
 import { createUseWebSocketQuery } from './useWebSocketQuery';
-import { clearPollingCache } from '../polling/queryClient';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { clearPollingCache, getQueryClient } from '../polling/queryClient';
 import type { SyncType } from '../../types';
 import { normalizeDemoPrincipal } from '../../principal';
 
@@ -14,6 +15,9 @@ interface WebSocketAdapterProps {
   userId?: string;
   server?: string;
   restEndpoint?: string;
+  /** Token appended as `?token=` to REST fetches. Unused by Zero's own reads;
+   *  published on SyncContext for `useRestSyncQuery` (WI-39772). */
+  tokenQueryParam?: string;
   pollIntervalMs?: number;
   onTransportError?: (error: Error) => void;
   /**
@@ -125,6 +129,8 @@ function WebSocketAdapter({
   children,
   userId = 'anonymous',
   server,
+  restEndpoint,
+  tokenQueryParam,
   onTransportError,
   schema,
   queries,
@@ -133,6 +139,11 @@ function WebSocketAdapter({
 }: WebSocketAdapterProps) {
   const principal = normalizeDemoPrincipal(userId);
   const zeroServer = server ?? resolveDefaultZeroServer();
+  // Zero serves this adapter's own reads, so nothing here fetches over REST.
+  // We still resolve and publish the endpoint (same rule as the polling/SSE
+  // adapters) because `useRestSyncQuery` needs it to reach names the Zero
+  // registry deliberately has no leaf for — WI-39772.
+  const restBase = restEndpoint ?? `${zeroServer}/zero`;
   const cacheKey = `${userId}|${zeroServer}|${kvStore}`;
   const zeroRef = useRef<Zero<any> | null>(null);
 
@@ -289,18 +300,28 @@ function WebSocketAdapter({
       principal,
       useDataImpl,
       prefetch: noop,
+      restEndpoint: restBase,
+      tokenQueryParam,
       // Zero's namespaced custom-mutator dispatcher — drives optimistic writes
       // via useSyncMutate. Stable for the life of the cached Zero instance.
       mutate: (zeroRef.current?.mutate ?? null) as Record<string, Record<string, (a: any) => Promise<unknown>>> | null,
     }),
-    [principal, useDataImpl, noop],
+    [principal, useDataImpl, noop, restBase, tokenQueryParam],
   );
 
   return (
     <ZeroProvider zero={zeroRef.current!}>
-      <SyncContext.Provider value={ctxValue}>
-        {children}
-      </SyncContext.Provider>
+      {/* The polling/SSE adapters mount this; this one did not, so any
+          react-query consumer under WebSockets threw "No QueryClient set".
+          `useRestSyncQuery` is exactly such a consumer, so the provider is
+          required here too. `getQueryClient` is a module-level singleton, so
+          this shares one cache with the other transports rather than creating
+          a second. */}
+      <QueryClientProvider client={getQueryClient()}>
+        <SyncContext.Provider value={ctxValue}>
+          {children}
+        </SyncContext.Provider>
+      </QueryClientProvider>
     </ZeroProvider>
   );
 }
