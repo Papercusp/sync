@@ -142,7 +142,22 @@ function WebSocketAdapter({
   let cached = ZERO_CACHE.get(cacheKey);
   if (!cached) {
     const zero = new Zero({
-      userID: userId,
+      // The identity the connection claims. zero-cache pins a client group to
+      // one userID and then asks our API to confirm it, so this must be the
+      // SAME string the API will resolve from `auth` below — hence the
+      // normalized `principal` rather than the raw prop when they differ.
+      userID: principal ?? userId,
+      // Zero forwards this verbatim to /zero/query and /zero/mutate as
+      // `Authorization: Bearer <auth>`. It is the ONLY channel that carries who
+      // the user is across the zero-cache hop — `x-demo-principal` is a
+      // browser→API header and zero-cache does not forward it. Without this the
+      // API answered `userID: null`, which Zero reads as "server validated this
+      // connection as having no user", so it closed EVERY connection with
+      // `Unauthorized: Connection userID does not match validated server userID`
+      // and the transport ladder demoted every user to polling (WI-39763).
+      // Opaque (non-JWT) tokens are the supported shape when zero-cache runs
+      // without ZERO_AUTH_* configured, which is how ours is deployed.
+      ...(principal ? { auth: principal } : {}),
       server: zeroServer,
       schema,
       // KV backend for the local replica. 'mem' (shop default) keeps it in
