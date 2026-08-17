@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { lazyWithRetry as lazy } from './lazy-with-retry';
 import { PollingAdapter } from './transports/polling/PollingAdapter';
 import { useTransportFallback } from './fallback/useTransportFallback';
@@ -256,7 +256,9 @@ export function SyncProvider({
     const { cached, promise } = probeWebSocketOnce(resolvedServer, WS_PROBE_MS);
     if (cached) {
       setWsHealthy(cached === 'healthy');
-      if (cached === 'blocked') onTransportError(new Error('WebSocket blocked (cached this session)'));
+      if (cached === 'blocked') {
+        onTransportError(new Error('WebSocket blocked (cached this session)'), 'WEBSOCKETS');
+      }
       return;
     }
     promise.then((verdict) => {
@@ -265,7 +267,8 @@ export function SyncProvider({
       setWsHealthy(healthy);
       if (!healthy) {
         // Move the fallback chain WEBSOCKETS → SSE → POLLING so metadata matches.
-        onTransportError(new Error(`WebSocket probe to ${resolvedServer} blocked`));
+        // Stamped explicitly: this is unambiguously the WS rung failing.
+        onTransportError(new Error(`WebSocket probe to ${resolvedServer} blocked`), 'WEBSOCKETS');
       }
     });
 
@@ -274,11 +277,42 @@ export function SyncProvider({
     };
   }, [syncType, server, onTransportError]);
 
+  // ── Which rung of the fallback ladder are we on? ───────────────────────
+  //
+  // `useTransportFallback` walks WEBSOCKETS → SSE → POLLING, but two things
+  // have to be true for a WEBSOCKETS-preferred provider to actually honour
+  // that ladder:
+  //
+  //   1. The SSE rung must be chosen by the ACTIVE transport, not by
+  //      `syncType`. This branch used to read `syncType === 'SSE' && ...`,
+  //      which is false for a provider that PREFERS WebSockets — so the
+  //      fallback chain silently collapsed to WEBSOCKETS → POLLING and the
+  //      SSE rung was unreachable for exactly the consumer that needs it.
+  //
+  //   2. A failed probe is already a definitive verdict on the WS rung, so
+  //      step down as soon as we have it. Waiting for the `fallbackDelayMs`
+  //      debounce to advance `activeTransport` would serve ~10s of REST
+  //      polling first — the transport this app can least afford.
+  const effectiveTransport: SyncType =
+    syncType === 'WEBSOCKETS' && wsHealthy === false && activeTransport === 'WEBSOCKETS'
+      ? 'SSE'
+      : activeTransport;
+
+  // Adapters report failures under the rung they are actually RENDERING, not
+  // the hook's `activeTransport`. Those diverge for ~`fallbackDelayMs` after a
+  // failed WS probe (rule 2 above renders SSE immediately while the ladder
+  // catches up); unstamped, SSE's own errors would be attributed to the WS
+  // rung and swallowed by its pending debounce.
+  const onEffectiveTransportError = useCallback(
+    (error: Error) => onTransportError(error, effectiveTransport),
+    [onTransportError, effectiveTransport],
+  );
+
   // schema/queries are only used by the WebSocket transport; PollingAdapter
   // ignores them safely. Threading both through commonProps keeps the call
   // sites parallel.
   const commonProps = {
-    userId, server, restEndpoint, pollIntervalMs, onTransportError, schema, queries, mutators,
+    userId, server, restEndpoint, pollIntervalMs, onTransportError: onEffectiveTransportError, schema, queries, mutators,
     // WS-only knob — polling / SSE adapters ignore it.
     kvStore,
     // SSE-only knobs — WS / polling adapters ignore them.
@@ -314,27 +348,6 @@ export function SyncProvider({
   if (!mounted) {
     return <PendingSyncAdapter transport={syncType} principal={principal}>{children}</PendingSyncAdapter>;
   }
-
-  // ── Which rung of the fallback ladder are we on? ───────────────────────
-  //
-  // `useTransportFallback` walks WEBSOCKETS → SSE → POLLING, but two things
-  // have to be true for a WEBSOCKETS-preferred provider to actually honour
-  // that ladder:
-  //
-  //   1. The SSE rung must be chosen by the ACTIVE transport, not by
-  //      `syncType`. This branch used to read `syncType === 'SSE' && ...`,
-  //      which is false for a provider that PREFERS WebSockets — so the
-  //      fallback chain silently collapsed to WEBSOCKETS → POLLING and the
-  //      SSE rung was unreachable for exactly the consumer that needs it.
-  //
-  //   2. A failed probe is already a definitive verdict on the WS rung, so
-  //      step down as soon as we have it. Waiting for the `fallbackDelayMs`
-  //      debounce to advance `activeTransport` would serve ~10s of REST
-  //      polling first — the transport this app can least afford.
-  const effectiveTransport: SyncType =
-    syncType === 'WEBSOCKETS' && wsHealthy === false && activeTransport === 'WEBSOCKETS'
-      ? 'SSE'
-      : activeTransport;
 
   // SSE rung — the primary path for desktop/operator deployments, and the
   // first fallback for WebSocket consumers. The SSEAdapter wraps the polling
@@ -378,7 +391,7 @@ export function SyncProvider({
       fallback={pollingFallback('polling-ws-errored')}
       onError={() => {
         // Force the fallback chain to record the failure so we stay on polling
-        onTransportError(new Error('WebSocket subtree threw during render'));
+        onTransportError(new Error('WebSocket subtree threw during render'), 'WEBSOCKETS');
         setWsHealthy(false);
       }}
     >
