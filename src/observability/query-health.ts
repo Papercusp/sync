@@ -12,8 +12,11 @@
  *   1. **args-flip waterfall** — the query fetched, then its args changed
  *      moments after mount (a dependency like a default-scope list resolved)
  *      and it fetched AGAIN. The first fetch's work was thrown away; the
- *      first paint paid for both, serially. Fix: gate with `enabled` until
- *      the query's inputs are actually resolved.
+ *      first paint paid for both, serially. Fires only when the change is an
+ *      input resolving late (blank → value) on an ENABLED query — a user
+ *      re-selection (value → value) refetches data they asked for, and a
+ *      disabled query does not refetch at all (WI-39558). Fix: gate with
+ *      `enabled` until the query's inputs are actually resolved.
  *   2. **oversized payload** — the parsed result is far bigger than a view
  *      needs. Usually the resolver is shipping fields nothing renders, or an
  *      unpaginated corpus. Fix: slim the projection / paginate.
@@ -115,8 +118,29 @@ function argsKeyOf(args: Record<string, unknown> | undefined): string {
   }
 }
 
+/**
+ * True when some arg went unresolved → resolved (absent/null/'' → a real
+ * value) across an args change — the waterfall defect's signature ("the query
+ * fetched before its inputs finished resolving"). A value → value change is a
+ * re-selection: its refetch is work the user asked for, not waste (WI-39558).
+ */
+function argsResolvedLate(
+  prev: Record<string, unknown> | undefined,
+  next: Record<string, unknown> | undefined,
+): boolean {
+  if (!next) return false;
+  for (const [name, value] of Object.entries(next)) {
+    if (value === '' || value == null) continue;
+    const prevValue = prev?.[name];
+    if (prevValue === '' || prevValue == null) return true;
+  }
+  return false;
+}
+
 interface ObserverState {
   argsKey: string;
+  /** The args object behind argsKey (for the waterfall's blank→value test). */
+  args: Record<string, unknown> | undefined;
   /** performance.now() when the CURRENT argsKey started fetching (NaN = never). */
   fetchStartedAt: number;
   /** A fetch was observed (started or finished) under the current argsKey. */
@@ -151,6 +175,7 @@ export function useQueryHealthObserver(opts: SyncQueryOptions, result: SyncQuery
       stateRef.current ??
       (stateRef.current = {
         argsKey,
+        args: opts.args,
         fetchStartedAt: NaN,
         fetchedCurrentArgs: false,
         sizeChecked: false,
@@ -183,8 +208,16 @@ export function useQueryHealthObserver(opts: SyncQueryOptions, result: SyncQuery
 
     // ── Defect 1: the args-flip waterfall ────────────────────────────────
     if (argsKey !== state.argsKey) {
-      const sinceFetchStart = now() - state.fetchStartedAt;
-      if (state.fetchedCurrentArgs && sinceFetchStart <= config.waterfallWindowMs) {
+      const nowMs = now();
+      const sinceFetchStart = nowMs - state.fetchStartedAt;
+      // Only an ENABLED change refetches, and only a late-resolving input
+      // (blank → value) is wasted work — see argsResolvedLate (WI-39558).
+      if (
+        enabled &&
+        state.fetchedCurrentArgs &&
+        sinceFetchStart <= config.waterfallWindowMs &&
+        argsResolvedLate(state.args, opts.args)
+      ) {
         warnOnce(
           queryName,
           'waterfall',
@@ -198,20 +231,25 @@ export function useQueryHealthObserver(opts: SyncQueryOptions, result: SyncQuery
       // unstable args object (a `{}`/array literal or a value like Date.now()
       // recomputed every render). react-query hashes keys structurally, so
       // this only fires when the CONTENT actually changes each render — the
-      // costly kind. Fix: useMemo the args (or stabilise the derived value).
-      const nowMs = now();
-      state.argsChangeTimes.push(nowMs);
-      state.argsChangeTimes = state.argsChangeTimes.filter((t) => nowMs - t <= config.argsChurnWindowMs);
-      if (state.argsChangeTimes.length > config.argsChurnCountWarn) {
-        warnOnce(
-          queryName,
-          'churn',
-          `"${queryName}" changed its args ${state.argsChangeTimes.length}× in ${config.argsChurnWindowMs}ms — the args ` +
-            `identity is unstable (a fresh object/array every render, or a value like Date.now() computed inline). Each ` +
-            `change is a new cache key and a refetch. useMemo the args object / stabilise the derived value (papercusp WI-5412).`,
-        );
+      // costly kind. Only ENABLED changes count: a disabled query never
+      // refetches, so its args moving (a cross-kind selection rippling into
+      // it) costs nothing (WI-39558). Fix: useMemo the args (or stabilise the
+      // derived value).
+      if (enabled) {
+        state.argsChangeTimes.push(nowMs);
+        state.argsChangeTimes = state.argsChangeTimes.filter((t) => nowMs - t <= config.argsChurnWindowMs);
+        if (state.argsChangeTimes.length > config.argsChurnCountWarn) {
+          warnOnce(
+            queryName,
+            'churn',
+            `"${queryName}" changed its args ${state.argsChangeTimes.length}× in ${config.argsChurnWindowMs}ms — the args ` +
+              `identity is unstable (a fresh object/array every render, or a value like Date.now() computed inline). Each ` +
+              `change is a new cache key and a refetch. useMemo the args object / stabilise the derived value (papercusp WI-5412).`,
+          );
+        }
       }
       state.argsKey = argsKey;
+      state.args = opts.args;
       state.fetchStartedAt = NaN;
       state.fetchedCurrentArgs = false;
       state.sizeChecked = false;

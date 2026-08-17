@@ -71,13 +71,38 @@ describe('args-flip waterfall', () => {
   });
 
   it('warns only once per query for the same shape', () => {
+    // null → value transitions: each change is a genuine late-resolution (the
+    // waterfall signature) without tripping the blank-arg check.
     const { rerender } = renderHook(
       ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
-      { initialProps: { o: opts({ args: { a: 1 } }), r: res({ fetching: true }) } },
+      { initialProps: { o: opts({ args: { a: null, b: null } }), r: res({ fetching: true }) } },
     );
-    rerender({ o: opts({ args: { a: 2 } }), r: res({ fetching: true }) });
-    rerender({ o: opts({ args: { a: 3 } }), r: res({ fetching: true }) });
+    rerender({ o: opts({ args: { a: 'x', b: null } }), r: res({ fetching: true }) });
+    rerender({ o: opts({ args: { a: 'x', b: 'y' } }), r: res({ fetching: true }) });
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays silent on a value → value re-selection (WI-39558)', () => {
+    // A user picking a different row (WI-2 → WI-1) refetches, but that fetch
+    // is data they asked for — the waterfall signature is an input resolving
+    // late (blank → value), and this is not it.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { id: 'WI-2' } }), r: res({ fetching: true }) } },
+    );
+    rerender({ o: opts({ args: { id: 'WI-1' } }), r: res({ fetching: true }) });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when the query is disabled at the moment its args change (WI-39558)', () => {
+    // Fetch ran while enabled, then the caller disabled the query and its
+    // args moved on (a cleared selection): no refetch happens, so no waste.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { id: null } }), r: res({ fetching: true }) } },
+    );
+    rerender({ o: opts({ args: { id: 'WI-1' }, enabled: false }), r: res() });
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
@@ -125,6 +150,39 @@ describe('args-identity churn', () => {
     rerender({ o: opts({ args: { a: 2 } }), r: res() });
     rerender({ o: opts({ args: { a: 3 } }), r: res() });
     rerender({ o: opts({ args: { a: 4 } }), r: res() });
+    expect(warn.mock.calls.some(([m]) => String(m).includes('unstable'))).toBe(true);
+  });
+
+  it('ignores args changes while the query is disabled (WI-39558)', () => {
+    configureQueryHealth({ argsChurnCountWarn: 2 });
+    // A disabled query never refetches, so its args moving (e.g. a cross-kind
+    // selection rippling into it) costs nothing — and must not warn.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { featureId: 'WI-1' }, enabled: false }), r: res() } },
+    );
+    rerender({ o: opts({ args: { featureId: 'WI-2' }, enabled: false }), r: res() });
+    rerender({ o: opts({ args: { featureId: 'WI-3' }, enabled: false }), r: res() });
+    rerender({ o: opts({ args: { featureId: 'WI-4' }, enabled: false }), r: res() });
+    rerender({ o: opts({ args: { featureId: 'WI-5' }, enabled: false }), r: res() });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('counts only the changes made while enabled (WI-39558)', () => {
+    configureQueryHealth({ argsChurnCountWarn: 2 });
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { id: 'a' } }), r: res() } },
+    );
+    // Two disabled changes must not contribute to the count…
+    rerender({ o: opts({ args: { id: 'b' }, enabled: false }), r: res() });
+    rerender({ o: opts({ args: { id: 'c' }, enabled: false }), r: res() });
+    // …so two enabled changes stay under the >2 threshold…
+    rerender({ o: opts({ args: { id: 'd' } }), r: res() });
+    rerender({ o: opts({ args: { id: 'e' } }), r: res() });
+    expect(warn).not.toHaveBeenCalled();
+    // …and the third enabled change is the one that crosses it.
+    rerender({ o: opts({ args: { id: 'f' } }), r: res() });
     expect(warn.mock.calls.some(([m]) => String(m).includes('unstable'))).toBe(true);
   });
 });
