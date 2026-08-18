@@ -2,6 +2,7 @@
 
 import { useContext } from 'react';
 import { SyncContext } from './SyncContext';
+import { getQueryClient } from './transports/polling/queryClient';
 import { useRestQuery } from './transports/polling/usePollingQuery';
 import type { SyncQueryOptions, SyncQueryResult } from './types';
 
@@ -38,6 +39,16 @@ const NO_ENDPOINT = 'about:blank';
  * Outside a `<SyncProvider>` (or during the SSR/WS-probe window, where no
  * endpoint is known) it returns an inert loading result rather than throwing —
  * matching `useSyncQuery`'s no-provider behaviour.
+ *
+ * That last guarantee is why the QueryClient is passed EXPLICITLY rather than
+ * read from a `QueryClientProvider`. `useRestQuery` calls `useQuery`
+ * unconditionally, and a missing client is a THROW; the transport adapters all
+ * mount a provider, but `PendingSyncAdapter` — the placeholder that covers SSR
+ * and the WS-probe window on every first page load — mounts only a SyncContext.
+ * Binding the singleton here means these call sites degrade to an empty read in
+ * that window instead of crashing the subtree, which is what they did as
+ * `useSyncQuery` calls before WI-39772. It is the same client the adapters put
+ * on the context, so nothing changes where a provider does exist.
  */
 export function useRestSyncQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
   const ctx = useContext(SyncContext);
@@ -52,5 +63,6 @@ export function useRestSyncQuery<T = any>(opts: SyncQueryOptions): SyncQueryResu
     // No endpoint ⇒ nothing to fetch. Disable rather than fire at a
     // placeholder URL, but still call the hook so order stays stable.
     restEndpoint ? opts : { ...opts, enabled: false },
+    getQueryClient(),
   );
 }

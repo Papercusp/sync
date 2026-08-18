@@ -38,11 +38,16 @@ const EMPTY_ARRAY: readonly unknown[] = Object.freeze([]);
  *    transport — including WEBSOCKETS, where the Zero registry has no leaf
  *    for the name and `resolveQuery` would throw (WI-39772).
  *
- * Requires a `QueryClientProvider` above it; every adapter mounts one.
+ * Needs a QueryClient, and `useQuery` is called UNCONDITIONALLY (hook order),
+ * so "no client" is a THROW, not a degraded read. Callers reached from inside
+ * an adapter get one from the `QueryClientProvider` that adapter mounts; pass
+ * `queryClient` explicitly for a caller that can mount where NO provider
+ * exists — see `useRestSyncQuery`, which does.
  */
 export function useRestQuery<T = any>(
   config: PollingConfig,
   opts: SyncQueryOptions,
+  queryClient?: QueryClient,
 ): SyncQueryResult<T> {
   const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime } = opts;
   const interval = pollIntervalMs ?? config.defaultPollIntervalMs;
@@ -79,7 +84,7 @@ export function useRestQuery<T = any>(
       previousQuery?.queryKey[1] === principal ? previousData : undefined
     ),
     ...(staleTime !== undefined ? { staleTime } : {}),
-  });
+  }, queryClient);
 
   // Track cache hits: when the hook returns data on the first render without
   // having gone through queryFn (e.g. another subscriber filled the cache,
