@@ -89,9 +89,14 @@ vi.mock('@rocicorp/zero/react', async () => {
   };
 });
 
-// The polling cache pulls in TanStack Query; the adapter only calls it for its
-// side effect on mount and nothing here asserts on it.
-vi.mock('../polling/queryClient', () => ({ clearPollingCache: () => {} }));
+// Stub only clearPollingCache (a mount side effect nothing here asserts on);
+// spread the real module so the adapter's other imports — getQueryClient for
+// its QueryClientProvider — stay real and new exports never silently vanish
+// from a hand-listed factory.
+vi.mock('../polling/queryClient', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../polling/queryClient')>()),
+  clearPollingCache: () => {},
+}));
 
 import WebSocketAdapter from './WebSocketAdapter';
 
