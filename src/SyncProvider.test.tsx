@@ -58,22 +58,41 @@ const ZERO_SERVER = 'http://zero.test';
  * Stand-in for the browser WebSocket the probe constructs. `mode` decides how
  * the handshake resolves; the events fire on a microtask because
  * `probeWebSocket` assigns `onopen`/`onerror` AFTER the constructor returns.
+ *
+ * An accepted upgrade (`open`) alone is NOT proof of a zero-cache — any
+ * reverse proxy accepts it, which is the false positive that promoted the
+ * broken WS rung on prod (WI-39855). The probe now demands a first frame or
+ * zero-cache's close-1002 `closeWithError` fingerprint, so the fake models
+ * all four behaviours:
+ * - 'healthy': open, then a first server frame (a talking zero-cache)
+ * - 'close-1002': open, then close(1002) (zero-cache rejecting a bare probe)
+ * - 'open-silent': open and NOTHING after — a proxy black hole; must step down
+ * - 'blocked': the upgrade itself errors
  */
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
-  static mode: 'healthy' | 'blocked' = 'healthy';
+  static mode: 'healthy' | 'close-1002' | 'open-silent' | 'blocked' = 'healthy';
 
   onopen: (() => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
   closed = false;
 
   constructor(readonly url: string) {
     FakeWebSocket.instances.push(this);
     const mode = FakeWebSocket.mode;
     queueMicrotask(() => {
-      if (mode === 'healthy') this.onopen?.();
-      else this.onerror?.();
+      if (mode === 'blocked') {
+        this.onerror?.();
+        return;
+      }
+      this.onopen?.();
+      queueMicrotask(() => {
+        if (mode === 'healthy') this.onmessage?.({ data: '{"pokeStart":{}}' });
+        else if (mode === 'close-1002') this.onclose?.({ code: 1002 });
+        // 'open-silent': nothing more — the probe must time out.
+      });
     });
   }
 
@@ -162,6 +181,26 @@ describe('SyncProvider WEBSOCKETS → SSE → POLLING ladder', () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
     expect(FakeWebSocket.instances[0].url).toBe('ws://zero.test');
     expect(container.textContent).toBe('child');
+  });
+
+  it('accepts a zero-cache that rejects the bare probe with close-1002 as healthy', async () => {
+    // zero-cache `closeWithError`s a probe connection that speaks no sync
+    // protocol — that close code is proof of a protocol-speaking server, not
+    // a failure. Treating it as blocked would demote WS on every healthy prod.
+    FakeWebSocket.mode = 'close-1002';
+
+    await renderProvider(10_000);
+    await waitFor(() => expect(rung()).toBe('WEBSOCKETS'));
+  });
+
+  it('steps down when the upgrade is accepted but nothing zero-shaped ever answers', async () => {
+    // The WI-39855 false positive: any reverse proxy fires `open`, so `open`
+    // alone must NOT promote the WS rung. With no first frame and no
+    // 1002-close, the probe times out and the ladder steps down to SSE.
+    FakeWebSocket.mode = 'open-silent';
+
+    await renderProvider(60_000);
+    await waitFor(() => expect(rung()).toBe('SSE'), 5_000);
   });
 
   it('steps down to the SSE rung when the probe is blocked, without waiting out the fallback debounce', async () => {
