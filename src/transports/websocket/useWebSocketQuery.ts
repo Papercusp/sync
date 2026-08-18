@@ -23,8 +23,17 @@ export function createUseWebSocketQuery(queries: any) {
     const query = useMemo(() => resolveQuery(queryName, args, queries), [queryName, JSON.stringify(args)]);
     const [data] = useQuery(enabled ? query : undefined, ttl !== undefined ? { ttl: ttl as any } : undefined);
 
+    // A `.one()` query yields a SINGULAR row (or undefined on no match), while
+    // the SyncQueryResult contract is always T[] — every consumer unwraps
+    // data[0] (WI-39855 drift axis: cardinality). Normalize here so a singular
+    // Zero result can never leak through as a bare object.
+    const rows = useMemo(() => {
+      if (data === undefined || data === null) return EMPTY_ARRAY;
+      return Array.isArray(data) ? data : [data];
+    }, [data]);
+
     return {
-      data: (data ?? (EMPTY_ARRAY as unknown)) as T[],
+      data: rows as T[],
       loading: data === undefined,
       fetching: false,
       transport: 'WEBSOCKETS',

@@ -100,9 +100,16 @@ type ProbeResult = 'unknown' | 'healthy' | 'blocked';
  * Attempt a single WebSocket upgrade to determine whether WS transport is
  * usable in this environment. Resolves with:
  *
- * - 'healthy' when `open` fires (handshake completed)
+ * - 'healthy' when, AFTER `open`, the server either sends a first frame or
+ *   closes with code 1002 — zero-cache's `closeWithError` fingerprint for a
+ *   bare probe connection. Both prove a protocol-speaking zero-cache is on
+ *   the other end. `open` ALONE proves only that something accepted the
+ *   upgrade (any reverse proxy does), which is exactly the false positive
+ *   that promoted the broken WS rung on prod (WI-39855) — so `open` never
+ *   settles the probe by itself.
  * - 'blocked' when the constructor throws, an `error` fires, `close` fires
- *   before `open`, or `WS_PROBE_MS` elapses with no `open`.
+ *   before `open` or with a non-1002 code and no frame seen, or `WS_PROBE_MS`
+ *   elapses without a frame/1002-close.
  *
  * We probe the zero server directly so we're testing the exact origin and
  * protocol Zero itself will use.
@@ -131,9 +138,14 @@ function probeWebSocket(server: string, timeoutMs: number): Promise<ProbeResult>
 
     try {
       ws = new WSCtor(wsUrl);
-      ws.onopen = () => finish('healthy');
+      // Deliberately no onopen → finish('healthy'): wait for proof of a
+      // zero-cache behind the socket, not merely an accepted upgrade.
+      ws.onmessage = () => finish('healthy');
       ws.onerror = () => finish('blocked');
-      ws.onclose = () => { if (!settled) finish('blocked'); };
+      ws.onclose = (ev) => {
+        if (settled) return;
+        finish(ev.code === 1002 ? 'healthy' : 'blocked');
+      };
     } catch {
       finish('blocked');
     }
