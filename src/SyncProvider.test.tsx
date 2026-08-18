@@ -138,8 +138,11 @@ function renderProvider(fallbackDelayMs: number) {
           endpointOverride: 'http://sync.test/sync/sse',
           pollIntervalMs: 60_000,
           fallbackDelayMs,
+          // `children` is a REQUIRED prop of SyncProviderProps, and the
+          // third-argument form of createElement does not satisfy the props
+          // type — pass it here so this file typechecks.
+          children: createElement('span', null, 'child'),
         },
-        createElement('span', null, 'child'),
       ),
     );
   });
