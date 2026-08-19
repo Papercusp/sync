@@ -30,11 +30,14 @@ const NO_ENDPOINT = 'about:blank';
  * (the other seven).
  *
  * This hook is the fix for that class: same options, same result shape as
- * `useSyncQuery`, but always resolved through the batching REST fetcher, so the
- * call site behaves identically no matter which transport the provider settled
- * on. Use it for any name listed in `UNSYNCED_QUERY_REASONS`; keep using
- * `useSyncQuery` for names the registry actually serves, so those still get
- * real-time WebSocket sync.
+ * `useSyncQuery`, but never resolved against the Zero registry, so the call
+ * site behaves identically no matter which transport the provider settled on.
+ * On SSE and polling it reads through the provider's own hook (the same REST
+ * fetcher, reached the way `useSyncQuery` reaches it); on WebSockets it goes
+ * to REST directly, since that is the one rung whose hook would throw. Use it
+ * for any name listed in `UNSYNCED_QUERY_REASONS`; keep using `useSyncQuery`
+ * for names the registry actually serves, so those still get real-time
+ * WebSocket sync.
  *
  * Outside a `<SyncProvider>` (or during the SSR/WS-probe window, where no
  * endpoint is known) it returns an inert loading result rather than throwing —
@@ -53,16 +56,44 @@ const NO_ENDPOINT = 'about:blank';
 export function useRestSyncQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
   const ctx = useContext(SyncContext);
   const restEndpoint = ctx?.restEndpoint;
-  return useRestQuery<T>(
+
+  // Prefer the provider's own data hook on every rung EXCEPT WebSockets.
+  //
+  // On SSE and polling that hook IS this REST path — both adapters build it
+  // with `createUsePollingQuery`, the same fetcher `useRestQuery` wraps — so
+  // going through the context is the identical request while keeping the
+  // adapter's batching, invalidation and endpoint/principal resolution. It is
+  // also the seam consumers substitute (a stubbed `useDataImpl`, an SSR probe
+  // provider); bypassing it made those substitutions silently ineffective.
+  //
+  // WebSockets is the exception this hook exists for: that impl resolves the
+  // name against the Zero registry in a `useMemo` that runs BEFORE it consults
+  // `enabled` (useWebSocketQuery.ts), so a name with no leaf throws
+  // `Query '<name>' is not a function` even when disabled — WI-39763/WI-39772.
+  // Nothing short of not calling it avoids that.
+  //
+  // Hook order is stable across the branch: every adapter hard-codes its
+  // `transport` as a literal, and moving between adapters swaps the component
+  // rendered above these children, remounting them.
+  const contextImpl =
+    ctx && ctx.transport !== 'WEBSOCKETS' && typeof ctx.useDataImpl === 'function'
+      ? ctx.useDataImpl
+      : null;
+
+  const restResult = useRestQuery<T>(
     {
       restEndpoint: restEndpoint ?? NO_ENDPOINT,
       defaultPollIntervalMs: 10_000,
       tokenQueryParam: ctx?.tokenQueryParam,
       principal: ctx?.principal ?? null,
     },
-    // No endpoint ⇒ nothing to fetch. Disable rather than fire at a
-    // placeholder URL, but still call the hook so order stays stable.
-    restEndpoint ? opts : { ...opts, enabled: false },
+    // Nothing to fetch when the context is already serving this call, or when
+    // no endpoint is known. Disable rather than fire at a placeholder URL, but
+    // still call the hook so its slot never moves.
+    contextImpl || !restEndpoint ? { ...opts, enabled: false } : opts,
     getQueryClient(),
   );
+
+  const contextResult = contextImpl ? contextImpl<T>(opts) : null;
+  return contextResult ?? restResult;
 }
