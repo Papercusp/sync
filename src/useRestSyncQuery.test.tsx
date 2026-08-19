@@ -21,9 +21,14 @@ import type { SyncQueryResult } from './types';
  *
  * Two invariants are locked here, and they fail in DIFFERENT ways:
  *
- *  1. The read goes through the batch fetcher — never the Zero registry. A
- *     regression that routes it back through `useDataImpl` fails the
- *     `getBatchFetcher` assertions.
+ *  1. The name never reaches the Zero REGISTRY. On the WebSocket rung that
+ *     means not calling `ctx.useDataImpl` at all — it is
+ *     `createUseWebSocketQuery`, which resolves the name in a `useMemo` that
+ *     runs BEFORE it consults `enabled`, so even a disabled call throws. On
+ *     every other rung `useDataImpl` IS the REST path (both PollingAdapter and
+ *     SSEAdapter build it with `createUsePollingQuery`), so the hook goes
+ *     THROUGH it there — that is the seam consumers stub, and bypassing it
+ *     silently disabled those stubs (36 web tests, WI-39869).
  *  2. It does not throw `No QueryClient set`. `useRestQuery` calls
  *     `useQuery` UNCONDITIONALLY (transports/polling/usePollingQuery.ts), so it
  *     needs a `QueryClientProvider` above it. The polling/SSE adapters always
@@ -251,8 +256,19 @@ describe('useRestSyncQuery', () => {
     const pendingValue = {
       transport: 'POLLING' as const,
       principal: null,
-      // Shape-matched to PendingSyncAdapter: no restEndpoint, inert reads.
-      useDataImpl: () => ({ data: [], loading: true }) as never,
+      // Shape-matched to PendingSyncAdapter, FIELD FOR FIELD (SyncProvider.tsx
+      // `emptyResult`). The abbreviated `{ data: [], loading: true }` this used
+      // to carry was not that shape — it omits `error`, so it modelled a
+      // provider that cannot exist and would have hidden a real `undefined`
+      // leaking into `error` here.
+      useDataImpl: () => ({
+        data: [],
+        loading: true,
+        fetching: false,
+        transport: 'POLLING' as const,
+        invalidate: () => {},
+        error: null,
+      }) as never,
       prefetch: () => {},
     };
     mount(
@@ -267,5 +283,102 @@ describe('useRestSyncQuery', () => {
     expect(H.batchReads).toEqual([]);
     expect(seen?.data).toEqual([]);
     expect(seen?.error).toBeNull();
+  });
+
+  /**
+   * THE SEAM. On SSE and polling the provider's `useDataImpl` IS this REST
+   * path — both adapters build it with `createUsePollingQuery` — so reading
+   * through it is the same request, and it is what every consumer stubs.
+   *
+   * Bypassing it is not a cosmetic difference: 12 call sites moved onto this
+   * hook when D-025 demoted their queries, and because the hook went straight
+   * to `useRestQuery` their tests' stubbed providers were silently ignored and
+   * 36 assertions across 9 files began rendering the loading branch (WI-39869).
+   * A stubbed provider that has no effect is the worst kind of failure — the
+   * test still runs, it just stops testing anything the stub describes.
+   */
+  it('reads THROUGH the provider hook on SSE, so a stubbed provider is honoured', async () => {
+    const useDataImpl = vi.fn(() => ({
+      data: [{ id: 'from-the-provider' }],
+      loading: false,
+      fetching: false,
+      transport: 'SSE' as const,
+      invalidate: () => {},
+      error: null,
+    }));
+    mount(
+      createElement(
+        SyncContext.Provider,
+        {
+          value: {
+            transport: 'SSE' as const,
+            principal: null,
+            useDataImpl,
+            prefetch: () => {},
+            restEndpoint: 'http://zero.test/zero',
+          } as never,
+        },
+        createElement(Consumer, { queryName: 'event.config' }),
+      ),
+    );
+    await settle();
+
+    expect(useDataImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ queryName: 'event.config', args: { a: 1 } }),
+    );
+    expect(seen?.data).toEqual([{ id: 'from-the-provider' }]);
+    // The provider served it, so the hook must not ALSO fetch — a double read
+    // would double every poll for these call sites.
+    expect(H.batchReads).toEqual([]);
+  });
+
+  /**
+   * THE EXCEPTION, and the one that must never be "simplified" away.
+   *
+   * On WEBSOCKETS `useDataImpl` is `createUseWebSocketQuery`, which resolves
+   * the name against the Zero registry inside a `useMemo` evaluated BEFORE it
+   * reads `enabled` (useWebSocketQuery.ts). So for a name the registry has no
+   * leaf for, even a DISABLED call throws `Query '<name>' is not a function` —
+   * which is WI-39763/WI-39772 exactly. Passing `enabled: false` does not save
+   * it; only not calling it does.
+   *
+   * The assertion is deliberately on the CALL, not on the absence of a throw:
+   * the fake registry here would not throw, so "it didn't crash" would pass
+   * vacuously.
+   */
+  it('does NOT call the provider hook on WEBSOCKETS, where it would hit the registry', async () => {
+    const useDataImpl = vi.fn(() => ({
+      data: [{ id: 'registry-resolved' }],
+      loading: false,
+      fetching: false,
+      transport: 'WEBSOCKETS' as const,
+      invalidate: () => {},
+      error: null,
+    }));
+    mount(
+      createElement(
+        SyncContext.Provider,
+        {
+          value: {
+            transport: 'WEBSOCKETS' as const,
+            principal: null,
+            useDataImpl,
+            prefetch: () => {},
+            restEndpoint: 'http://zero.test/zero',
+          } as never,
+        },
+        createElement(Consumer, { queryName: 'event.stats' }),
+      ),
+    );
+    await settle();
+
+    expect(useDataImpl).not.toHaveBeenCalled();
+    // Positive control: the read really did happen, over REST. Without this an
+    // assertion that the provider hook went uncalled would also pass if the
+    // hook had simply stopped reading anything at all.
+    expect(H.batchReads).toEqual([
+      { endpoint: 'http://zero.test/zero', queryName: 'event.stats', args: { a: 1 } },
+    ]);
+    expect(seen?.data).toEqual([{ id: 'event.stats-row' }]);
   });
 });
