@@ -28,7 +28,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.75.0"
+    "@tanstack/react-query": "^5.75.0",
+    "@tanstack/react-virtual": "^3.13.23",
+    "@tanstack/virtual-core": "^3.13.23"
   },
   "peerDependencies": {
     "@papercusp/sse": "*",
