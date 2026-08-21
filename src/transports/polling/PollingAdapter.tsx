@@ -26,7 +26,7 @@ interface PollingAdapterProps {
   queries?: any;
 }
 
-const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
+const DEFAULT_REST_ENDPOINT = 'http://localhost:3110/zero';
 
 let warnedDefaultRestEndpoint = false;
 

@@ -105,7 +105,7 @@ interface SSEAdapterProps {
   visibilityPause?: boolean;
 }
 
-const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
+const DEFAULT_REST_ENDPOINT = 'http://localhost:3110/zero';
 const VISIBILITY_PAUSE_MS = 5 * 60_000;
 
 interface InvalidateEvent {
