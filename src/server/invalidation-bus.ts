@@ -99,6 +99,18 @@ export interface CreateInvalidationBusOptions {
     eventName: string,
     eventArgs?: Record<string, unknown>,
   ) => readonly BridgeTarget[];
+  /**
+   * Optional dedupe-window policy for bridged targets. The callback receives
+   * the synthesized query name first and the source event name second; return
+   * a window in milliseconds, or `undefined` to keep the bus-wide default.
+   * Supplying the source as well as the query is deliberate: a low-volume
+   * source may need a short window for a query that is also fed by a hot
+   * source, without weakening that hot source's storm guard.
+   */
+  bridgedDedupeWindowMs?: (
+    queryName: string,
+    sourceEventName: string,
+  ) => number | undefined;
   /** Injectable clock (testing). Default Date.now. */
   now?: () => number;
   onError?: (where: string, err: unknown) => void;
@@ -250,7 +262,12 @@ export function createInvalidationBus(
       const name = typeof target === 'string' ? target : target.name;
       const targetArgs = typeof target === 'string' ? undefined : target.args;
       const key = `bridge:${parsed.name}|${name}|${targetArgs ? JSON.stringify(targetArgs) : ''}|`;
-      if (!shouldFanout(key, ev.ts, dedupeWindowMs)) continue;
+      const targetDedupeWindowMs = opts.bridgedDedupeWindowMs?.(name, parsed.name);
+      const effectiveDedupeWindowMs =
+        targetDedupeWindowMs === undefined || !Number.isFinite(targetDedupeWindowMs)
+          ? dedupeWindowMs
+          : Math.max(0, targetDedupeWindowMs);
+      if (!shouldFanout(key, ev.ts, effectiveDedupeWindowMs)) continue;
       const bridged: SyncEvent = { id: nextId++, ts: ev.ts, name };
       if (targetArgs !== undefined) bridged.args = targetArgs;
       fanout(bridged);

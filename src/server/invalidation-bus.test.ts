@@ -359,6 +359,54 @@ describe('invalidation-bus', () => {
     expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(2);
   });
 
+  it('shortens one source/query bridge window without weakening a hot source guard', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      bridge: (name) =>
+        name === 'harness_shared.coord_presence.changed' ||
+        name === 'harness_shared.agent_modes.changed'
+          ? ['advRoster.list']
+          : [],
+      // The target is shared by a hot heartbeat source and a low-volume
+      // control-plane source. The callback's source argument lets the latter
+      // use a short window without turning the former into a fan-out storm.
+      bridgedDedupeWindowMs: (queryName, sourceName) =>
+        queryName === 'advRoster.list' && sourceName === 'harness_shared.agent_modes.changed'
+          ? 1_000
+          : undefined,
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    // Hot coord_presence remains on the production 90s guard.
+    lb.deliver(JSON.stringify({ name: 'harness_shared.coord_presence.changed', args: { id: 'p1' } }));
+    clock.t += 10;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.coord_presence.changed', args: { id: 'p2' } }));
+    expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(1);
+
+    // Low-volume mode writes get through once their short window expires,
+    // while an immediate repeat is still coalesced.
+    lb.deliver(JSON.stringify({ name: 'harness_shared.agent_modes.changed', args: { id: 'm1' } }));
+    clock.t += 500;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.agent_modes.changed', args: { id: 'm2' } }));
+    expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(2);
+
+    clock.t += 501;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.agent_modes.changed', args: { id: 'm3' } }));
+    expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(3);
+
+    // The hot source is still throttled even though the low-volume source has
+    // its own override for the same query name.
+    clock.t += 1;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.coord_presence.changed', args: { id: 'p3' } }));
+    expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(3);
+  });
+
   it('bridged SCOPED targets with different args are not cross-suppressed', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
