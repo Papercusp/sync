@@ -249,6 +249,40 @@ describe('blank arg on an enabled query (P-027)', () => {
     expect(warn).not.toHaveBeenCalled();
     configureQueryHealth({ blankArgAllow: [] });
   });
+
+  it('treats a blank q as optional only when the query has a nonblank scope', () => {
+    renderHook(() =>
+      useQueryHealthObserver(
+        opts({ queryName: 'features.byHarness', args: { harnessSlug: 'papercusp', q: '' } }),
+        res(),
+      ),
+    );
+    renderHook(() =>
+      useQueryHealthObserver(
+        opts({ queryName: 'features.byWorkspace', args: { workspaceId: 'workspace-1', q: '' } }),
+        res(),
+      ),
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('still warns for blank q without scope and blank ids even when q is scoped', () => {
+    renderHook(() =>
+      useQueryHealthObserver(opts({ queryName: 'features.unscoped', args: { q: '' } }), res()),
+    );
+    renderHook(() =>
+      useQueryHealthObserver(
+        opts({ queryName: 'features.scopedWithBlankId', args: { id: '', harnessSlug: 'papercusp', q: '' } }),
+        res(),
+      ),
+    );
+    const blanks = warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes('blank id/slug'));
+    expect(blanks).toHaveLength(2);
+    expect(blanks.some((message) => message.includes('`q: ""`'))).toBe(true);
+    expect(blanks.some((message) => message.includes('`id: ""`'))).toBe(true);
+  });
 });
 
 describe('kill switch', () => {

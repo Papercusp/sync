@@ -118,6 +118,20 @@ function argsKeyOf(args: Record<string, unknown> | undefined): string {
   }
 }
 
+function hasNonBlankScopeArg(args: Record<string, unknown>): boolean {
+  return ['harnessSlug', 'workspaceId'].some((name) => {
+    const value = args[name];
+    return value != null && (typeof value !== 'string' || value.trim() !== '');
+  });
+}
+
+function isBlankArgAllowed(name: string, args: Record<string, unknown>): boolean {
+  // `q` is an optional filter for an already-scoped query, but it is not a
+  // globally meaningful blank value. Keep the exemption tied to the scope so
+  // a blank lookup key still warns when no scope has been resolved.
+  return config.blankArgAllow.includes(name) || (name === 'q' && hasNonBlankScopeArg(args));
+}
+
 /**
  * True when some arg went unresolved → resolved (absent/null/'' → a real
  * value) across an args change — the waterfall defect's signature ("the query
@@ -195,7 +209,7 @@ export function useQueryHealthObserver(opts: SyncQueryOptions, result: SyncQuery
     // `enabled: Boolean(id)` gate is the CORRECT shape and must stay silent.
     if (enabled && opts.args) {
       for (const [name, value] of Object.entries(opts.args)) {
-        if (value !== '' || config.blankArgAllow.includes(name)) continue;
+        if (value !== '' || isBlankArgAllowed(name, opts.args)) continue;
         warnOnce(
           queryName,
           `blank-arg:${name}`,
