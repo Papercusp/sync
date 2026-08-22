@@ -71,6 +71,13 @@ export interface SyncTransportSnapshot {
 export interface SyncMetricsSnapshot {
   /** ms since process start (performance.now-based) when this snapshot was taken. */
   takenAtMs: number;
+  /**
+   * Host-reported bounded startup IPC assertion state. These fields are absent
+   * until a host with an IPC startup probe reports a timeout; absence means the
+   * probe has not reported that outcome, not that IPC is healthy.
+   */
+  ipcAssertTimedOut?: boolean;
+  ipcAssertLastClient?: string | null;
   sse: {
     /** ms since the current connection opened, or null when disconnected. */
     connectedSinceMs: number | null;
@@ -135,6 +142,8 @@ interface MetricsState {
   cache: { hits: number; misses: number };
   invalidations: { fromSse: number; fromTimer: number; fromManual: number };
   invalidationsBySseName: Map<string, number>;
+  ipcAssertTimedOut: boolean | undefined;
+  ipcAssertLastClient: string | null;
   transport: {
     requests: number;
     failures: number;
@@ -173,6 +182,8 @@ const state: MetricsState = {
   cache: { hits: 0, misses: 0 },
   invalidations: { fromSse: 0, fromTimer: 0, fromManual: 0 },
   invalidationsBySseName: new Map(),
+  ipcAssertTimedOut: undefined,
+  ipcAssertLastClient: null,
   transport: freshTransport(),
   byQuery: new Map(),
   recent: [],
@@ -239,6 +250,16 @@ export const syncMetrics = {
     state.gateProbe = probe;
   },
   /**
+   * Record that a host's bounded startup IPC assertion gave up. This is a
+   * host-level diagnostic rather than a sync request counter, but it belongs
+   * in the same inspectable snapshot so a permanently capped session is not
+   * silent after the deadline expires.
+   */
+  recordIpcAssertionTimeout(lastClient: string | null): void {
+    state.ipcAssertTimedOut = true;
+    state.ipcAssertLastClient = lastClient;
+  },
+  /**
    * Record one completed query request. Called from the transport's gated path
    * so `waitMs` is the REAL queue wait — the interval the user spends waiting
    * for permission to make a request, which no previous counter exposed.
@@ -290,6 +311,12 @@ export const syncMetrics = {
     for (const [name, stat] of state.byQuery) byQuery[name] = { ...stat };
     return {
       takenAtMs: now(),
+      ...(state.ipcAssertTimedOut === undefined
+        ? {}
+        : {
+            ipcAssertTimedOut: state.ipcAssertTimedOut,
+            ipcAssertLastClient: state.ipcAssertLastClient,
+          }),
       transport: {
         inFlight: live ? live.inFlight : null,
         queued: live ? live.queued : null,
@@ -325,6 +352,8 @@ export const syncMetrics = {
     state.invalidations.fromTimer = 0;
     state.invalidations.fromManual = 0;
     state.invalidationsBySseName.clear();
+    state.ipcAssertTimedOut = undefined;
+    state.ipcAssertLastClient = null;
     state.transport = freshTransport();
     state.byQuery.clear();
     state.recent.length = 0;

@@ -12,12 +12,10 @@
  *   GET  rest-query?name=&args=<json>      → { rows, version } | { error }
  *   GET  sse                               → text/event-stream (invalidate|update|heartbeat)
  *
- * ⚠ `POST rest-query-batch` (`createRestBatchHandler` below) is NOT part of the
- * contract this library's own client transport speaks, and has not been since
- * 2026-07-26 — do not read it as live. `transports/polling/query-fetcher.ts`
- * issues ONE `GET rest-query` per query through a bounded concurrency gate; the
- * client batcher was deleted (drop-sync-batcher-2026-07-25). The handler is kept
- * only for hosts that mount it themselves; papercusp mounts it nowhere.
+ * The former `POST rest-query-batch` route was removed after the client batcher
+ * was deleted on 2026-07-26 (drop-sync-batcher-2026-07-25). The library's own
+ * transport issues ONE `GET rest-query` per query through a bounded concurrency
+ * gate; no host in this repository mounted the former batch route.
  *
  * 🚫 Do NOT "revive" batching here, and do NOT add streaming (NDJSON /
  * chunked-frame) results to it. That exact design was worked out in detail and
@@ -87,60 +85,6 @@ export function createRestQueryHandler(
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse({ error: msg, name }, 500);
     }
-  };
-}
-
-interface BatchQuery {
-  name: string;
-  args?: unknown;
-}
-
-/**
- * POST rest-query-batch { queries[] } — positional results, per-slot errors.
- *
- * ⚠ Mounted NOWHERE in papercusp and unused by this library's own client
- * transport (see the file header). If you arrived here intending to revive
- * batching or make it stream results incrementally, read
- * drop-sync-batcher-2026-07-25 **D-001** first — that design was rejected on
- * measurements, and individual requests beat this handler even at the
- * 6-connection cap.
- */
-export function createRestBatchHandler(
-  resolve: NamedQueryResolver,
-  opts?: { maxBatch?: number },
-): (req: Request) => Promise<Response> {
-  const maxBatch = opts?.maxBatch ?? 200;
-  return async (req: Request): Promise<Response> => {
-    let body: { queries?: BatchQuery[] };
-    try {
-      body = (await req.json()) as { queries?: BatchQuery[] };
-    } catch {
-      return jsonResponse({ error: 'invalid body (not JSON)' }, 400);
-    }
-    const list = body?.queries;
-    if (!Array.isArray(list) || list.length === 0) {
-      return jsonResponse({ error: 'body.queries must be a non-empty array' }, 400);
-    }
-    if (list.length > maxBatch) {
-      return jsonResponse({ error: `batch too large (max ${maxBatch})` }, 400);
-    }
-    if (req.signal.aborted) return new Response(null, { status: 499 });
-
-    const version = String(Date.now());
-    const results = await Promise.all(
-      list.map(async (q) => {
-        if (!q || typeof q.name !== 'string') return { error: 'missing query name' };
-        try {
-          const rows = await resolve(q.name, q.args ?? {});
-          if (rows === NAME_NOT_FOUND) return { error: `unknown queryName: ${q.name}` };
-          return { rows, version };
-        } catch (err) {
-          return { error: err instanceof Error ? err.message : String(err) };
-        }
-      }),
-    );
-    if (req.signal.aborted) return new Response(null, { status: 499 });
-    return bodyResponse(req, JSON.stringify({ results }));
   };
 }
 

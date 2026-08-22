@@ -40,7 +40,6 @@ export {
 
 export {
   createRestQueryHandler,
-  createRestBatchHandler,
   createSseHandler,
   type SsePrimitives,
 } from './http-routes';

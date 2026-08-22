@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   createRestQueryHandler,
-  createRestBatchHandler,
   createSseHandler,
   type SsePrimitives,
 } from './http-routes';
@@ -76,56 +75,6 @@ describe('createRestQueryHandler', () => {
   it('499 on an already-aborted request', async () => {
     const res = await handler(new Request('http://t/rest-query?name=q', { signal: AbortSignal.abort() }));
     expect(res.status).toBe(499);
-  });
-});
-
-describe('createRestBatchHandler', () => {
-  const handler = createRestBatchHandler(resolver);
-
-  it('400 on non-array body', async () => {
-    const res = await handler(
-      new Request('http://t/batch', { method: 'POST', body: JSON.stringify({ queries: {} }) }),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it('400 when batch exceeds the cap', async () => {
-    const h = createRestBatchHandler(resolver, { maxBatch: 1 });
-    const res = await h(
-      new Request('http://t/batch', {
-        method: 'POST',
-        body: JSON.stringify({ queries: [{ name: 'a' }, { name: 'b' }] }),
-      }),
-    );
-    expect(res.status).toBe(400);
-  });
-
-  it('returns positional results with per-slot errors', async () => {
-    const res = await handler(
-      new Request('http://t/batch', {
-        method: 'POST',
-        body: JSON.stringify({ queries: [{ name: 'q', args: { i: 1 } }, { name: 'missing' }, { name: 'boom' }] }),
-      }),
-    );
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { results: Array<{ rows?: unknown[]; error?: string }> };
-    expect(body.results[0].rows).toEqual([{ name: 'q', args: { i: 1 } }]);
-    expect(body.results[1].error).toMatch(/unknown queryName/);
-    expect(body.results[2].error).toMatch(/kaboom/);
-  });
-
-  // Inverse guard — see the rest-query block above.
-  it('does NOT compress a large batch body even when accept-encoding allows gzip', async () => {
-    const res = await handler(
-      new Request('http://t/batch', {
-        method: 'POST',
-        headers: { 'accept-encoding': 'gzip' },
-        body: JSON.stringify({ queries: [{ name: 'big' }] }),
-      }),
-    );
-    expect(res.headers.get('content-encoding')).toBeNull();
-    const json = (await res.json()) as { results: Array<{ rows: unknown[] }> };
-    expect(json.results[0].rows).toHaveLength(1);
   });
 });
 
