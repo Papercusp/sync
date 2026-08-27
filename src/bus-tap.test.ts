@@ -2,6 +2,20 @@ import { describe, expect, it, vi } from 'vitest';
 import { emitSyncBusEvent, onSyncBusEvent } from './bus-tap';
 
 describe('sync bus tap', () => {
+  it('shares subscribers across duplicate module evaluations', async () => {
+    vi.resetModules();
+    const subscriberCopy = await import('./bus-tap');
+    vi.resetModules();
+    const emitterCopy = await import('./bus-tap');
+    const seen: string[] = [];
+    const off = subscriberCopy.onSyncBusEvent((ev) => seen.push(ev.name));
+
+    emitterCopy.emitSyncBusEvent({ name: 'console.launch-request' });
+
+    expect(seen).toEqual(['console.launch-request']);
+    off();
+  });
+
   it('delivers events to subscribers and stops after unsubscribe', () => {
     const seen: string[] = [];
     const off = onSyncBusEvent((ev) => seen.push(ev.name));
