@@ -28,6 +28,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@papercusp/module-singleton": "*",
     "@tanstack/react-query": "^5.75.0",
     "@tanstack/react-virtual": "^3.13.23",
     "@tanstack/virtual-core": "^3.13.23"

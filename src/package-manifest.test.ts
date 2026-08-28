@@ -10,6 +10,10 @@ const packageManifest = JSON.parse(
 };
 
 describe('@papercusp/sync package manifest', () => {
+  it('declares the runtime singleton primitive used by the sync bus tap', () => {
+    expect(packageManifest.dependencies?.['@papercusp/module-singleton']).toBe('*');
+  });
+
   it('declares the runtime dependencies used by its public virtualizer export', () => {
     expect(packageManifest.dependencies?.['@tanstack/react-virtual']).toBe('^3.13.23');
     expect(packageManifest.dependencies?.['@tanstack/virtual-core']).toBe('^3.13.23');
