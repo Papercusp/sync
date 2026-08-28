@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
+import { moduleEvaluationCount } from '@papercusp/module-singleton';
 import { emitSyncBusEvent, onSyncBusEvent } from './bus-tap';
+
+const STATE_KEY = 'papercusp.sync.bus-tap.listeners';
 
 describe('sync bus tap', () => {
   it('shares subscribers across duplicate module evaluations', async () => {
+    const evaluationsBefore = moduleEvaluationCount(STATE_KEY);
     vi.resetModules();
     const subscriberCopy = await import('./bus-tap');
     vi.resetModules();
@@ -13,6 +17,7 @@ describe('sync bus tap', () => {
     emitterCopy.emitSyncBusEvent({ name: 'console.launch-request' });
 
     expect(seen).toEqual(['console.launch-request']);
+    expect(moduleEvaluationCount(STATE_KEY)).toBe(evaluationsBefore + 2);
     off();
   });
 
