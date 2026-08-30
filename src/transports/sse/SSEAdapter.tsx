@@ -61,7 +61,7 @@
  */
 import { useEffect, useMemo, type ReactNode } from 'react';
 import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
-import { createResilientEventSource } from '@papercusp/sse';
+import { createCrossTabControlStream } from '@papercusp/sse';
 import { SyncContext } from '../../SyncContext';
 import { getQueryClient } from '../polling/queryClient';
 import {
@@ -147,20 +147,31 @@ function SSESubscriber({
       : baseUrl;
 
     // Account for the consolidated control stream in the same per-origin
-    // budget as finite requests. Extra streams dynamically reduce admission;
-    // bulk/media transports use a separate registration and never consume
-    // this reservation (D-017/P-018).
-    const controlStream = getOriginScheduler(endpoint).registerStream({
-      name: 'control-sse',
-      kind: 'control',
-    });
+    // budget as finite requests. Only the elected physical owner holds this
+    // lease; follower tabs receive the owner's events over BroadcastChannel
+    // and therefore do not spend another origin connection. Extra streams
+    // dynamically reduce admission; bulk/media transports use a separate
+    // registration and never consume this reservation (D-017/P-018).
+    const scheduler = getOriginScheduler(endpoint);
+    let controlStream: ReturnType<typeof scheduler.registerStream> | null = null;
+    const onPhysicalStreamChange = (active: boolean): void => {
+      if (active) {
+        if (!controlStream) {
+          controlStream = scheduler.registerStream({
+            name: 'control-sse',
+            kind: 'control',
+          });
+        }
+      } else {
+        controlStream?.release();
+        controlStream = null;
+      }
+    };
 
     // Resilience (jitter, zombie watchdog, backoff, escalation, visibility
-    // pause) lives in @papercusp/sse's createResilientEventSource. This
-    // subscriber only owns the react-query invalidation/setQueryData
-    // wiring + syncMetrics calls. Behavior preserved verbatim against
-    // the pre-extraction implementation (libs/sse/src/client/resilient-event-source.ts
-    // is the literal port).
+    // pause) lives in @papercusp/sse's cross-tab control wrapper, which
+    // composes createResilientEventSource. This subscriber only owns the
+    // react-query invalidation/setQueryData wiring + syncMetrics calls.
     let firstConnect = true;
 
     const handlePayload = (data: string, parse: 'update' | 'invalidate') => {
@@ -239,7 +250,7 @@ function SSESubscriber({
       }
     };
 
-    const source = createResilientEventSource({
+    const source = createCrossTabControlStream({
       url: sseUrl,
       initialBackoffMs: 1_000,
       maxBackoffMs: 30_000,
@@ -250,7 +261,10 @@ function SSESubscriber({
       // After 3 consecutive failures with zero successful opens, escalate
       // via onError so useTransportFallback can move to POLLING.
       maxConsecutiveFailures: 3,
-      visibilityPause,
+      // A control stream should not remain parked in a hidden tab by default:
+      // the wrapper relinquishes the lease and lets a visible peer take over.
+      // Callers can explicitly opt out with visibilityPause={false}.
+      pauseWhenHidden: visibilityPause ?? true,
       visibilityPauseMs: VISIBILITY_PAUSE_MS,
       handlers: {
         heartbeat: () => { /* watchdog reset is handled inside the wrapper */ },
@@ -276,12 +290,14 @@ function SSESubscriber({
         if (s !== 'idle' && s !== 'closed') firstConnect = false;
       },
       onError,
+      onPhysicalStreamChange,
     });
 
     return () => {
       syncMetrics.sseDisconnected();
       source.close();
-      controlStream.release();
+      controlStream?.release();
+      controlStream = null;
     };
   }, [endpoint, queryClient, onError, tokenQueryParam, endpointOverride, visibilityPause]);
 
