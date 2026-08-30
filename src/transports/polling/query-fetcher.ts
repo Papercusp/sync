@@ -43,7 +43,14 @@ import {
   type SyncQueryTiming,
   type SyncServerTiming,
 } from '../../observability/metrics';
-import { createConcurrencyGate, type ConcurrencyGate } from './concurrency-gate';
+import {
+  getOriginScheduler,
+  peekOriginScheduler,
+  _resetOriginSchedulersForTests,
+  type OriginScheduler,
+  type OriginSchedulerClass,
+} from './origin-scheduler';
+import type { ConcurrencyGate } from './concurrency-gate';
 
 /** Monotonic-ish clock; `performance` is absent in some non-browser test hosts. */
 const nowMs = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -75,6 +82,16 @@ export interface QueryResult {
 export interface QueryFetchOptions {
   /** react-query's per-query signal. Aborts on unmount/cancel. */
   signal?: AbortSignal;
+  /** Admission class in the process-wide origin scheduler. */
+  requestClass?: OriginSchedulerClass | string;
+  /** Alias accepted by generic callers. */
+  class?: OriginSchedulerClass | string;
+  /** Supersedes a queued background refresh with the same key. */
+  coalesceKey?: string;
+  /** Optional per-call total scheduler deadline. */
+  timeoutMs?: number;
+  /** Age at which queued background work may be shed. */
+  staleAfterMs?: number;
 }
 
 export type QueryFetch = (name: string, args: unknown, opts?: QueryFetchOptions) => Promise<QueryResult>;
@@ -168,7 +185,7 @@ export const CONNECTION_CAPPED_MAX_IN_FLIGHT = 2;
 
 interface Fetcher {
   fetchQuery: QueryFetch;
-  gate: ConcurrencyGate;
+  gate: OriginScheduler;
 }
 
 const fetchers = new Map<string, Fetcher>();
@@ -255,7 +272,23 @@ export function getQueryFetcher(
     return existing.fetchQuery;
   }
 
-  const gate = createConcurrencyGate(maxInFlight ?? DEFAULT_MAX_IN_FLIGHT);
+  // One scheduler is pinned to the URL origin, not to this endpoint path or
+  // token variant.  An opinion-less later caller must inherit the existing
+  // profile; only an explicit cap retunes it (the old gate's contract).
+  const existingScheduler = peekOriginScheduler(restEndpoint);
+  const gate = existingScheduler
+    ? maxInFlight === undefined
+      ? existingScheduler
+      : getOriginScheduler(restEndpoint, {
+          limit: maxInFlight,
+          requestTimeoutMs,
+          profile: maxInFlight === CONNECTION_CAPPED_MAX_IN_FLIGHT ? 'browser-http' : 'ipc',
+        })
+    : getOriginScheduler(restEndpoint, {
+        limit: maxInFlight ?? DEFAULT_MAX_IN_FLIGHT,
+        requestTimeoutMs,
+        profile: maxInFlight === CONNECTION_CAPPED_MAX_IN_FLIGHT ? 'browser-http' : 'ipc',
+      });
   // P-003(b): publish the gate's LIVE depth. `inFlight`/`queued` have been on
   // the gate interface since it was written and nothing outside tests ever read
   // them, so a saturated gate — the exact condition that makes a user wait —
@@ -266,6 +299,7 @@ export function getQueryFetcher(
     queued: gate.queued,
     limit: gate.limit,
   }));
+  syncMetrics.registerSchedulerProbe(() => gate.snapshot());
 
   const sendOne = async (
     name: string,
@@ -430,8 +464,9 @@ export function getQueryFetcher(
     name: string,
     args: unknown,
     delta: string | undefined,
-    signal?: AbortSignal,
+    options: QueryFetchOptions = {},
   ): Promise<QueryResult> => {
+    const signal = options.signal;
     const queueDeadline = new AbortController();
     let expired = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -483,8 +518,34 @@ export function getQueryFetcher(
     let outcome: SyncQueryOutcome = 'ok';
     try {
       const running = gate.run(
-        () => sendOne(name, args, delta, queueDeadline.signal, meta),
-        queueDeadline.signal,
+        (schedulerSignal, schedulerContext) =>
+          // A holder can finish on the same timer turn that expires another
+          // caller's total deadline. Guard immediately before the wire call so
+          // the scheduler's pump cannot admit that already-expired waiter in
+          // the tiny ordering window between the two timer callbacks.
+          (nowMs() - startedAtMs >= requestTimeoutMs
+            ? Promise.reject< QueryResult>(
+                new Error(
+                  `sync query "${name}" timed out after ${requestTimeoutMs}ms waiting for a request slot`,
+                ),
+              )
+            : sendOne(name, args, delta, schedulerSignal, meta)
+          ).then((result) => {
+            schedulerContext.recordBytes(meta.bytes);
+            return result;
+          }),
+        {
+          signal: queueDeadline.signal,
+          class: options.requestClass ?? options.class ?? 'foreground-read',
+          coalesceKey: options.coalesceKey,
+          staleAfterMs: options.staleAfterMs,
+          // `runGated` owns the compatibility deadline and its diagnostic
+          // wording (queue wait vs in-flight). Disable the scheduler's own
+          // timer here so two same-length timers cannot race and hide that
+          // useful distinction; direct scheduler callers still get a total
+          // deadline by default.
+          timeoutMs: 0,
+        },
       );
       // The loser of the race can still reject later; swallow it so it is not
       // an unhandled rejection.
@@ -501,6 +562,21 @@ export function getQueryFetcher(
       return result;
     } catch (e) {
       outcome = expired ? 'timeout' : isAbortError(e, signal) ? 'aborted' : 'error';
+      // The scheduler observes `queueDeadline.abort()` and may reject its
+      // cancellation race a microtask before our expiry promise. Preserve the
+      // established, actionable message in that case instead of exposing an
+      // implementation-level AbortError.
+      if (expired && !signal?.aborted) {
+        const admittedAtMs = meta.sentAtMs;
+        throw new Error(
+          admittedAtMs === null
+            ? `sync query "${name}" timed out after ${requestTimeoutMs}ms waiting for a request slot`
+            : `sync query "${name}" timed out after ${requestTimeoutMs}ms in flight ` +
+              `(got a slot after ${Math.round(admittedAtMs - startedAtMs)}ms, then ` +
+              `${Math.round(nowMs() - admittedAtMs)}ms awaiting the response — the gate ` +
+              `was not the bottleneck)`,
+        );
+      }
       throw e;
     } finally {
       clearTimeout(timer);
@@ -538,16 +614,16 @@ export function getQueryFetcher(
   // re-request a clean full. A wrong or stale key can only cost a refetch,
   // never a wrong view.
   const fetchQuery: QueryFetch = async (name, args, opts) => {
-    const signal = opts?.signal;
+    const queryOptions = opts ?? {};
     const codec = getSyncDeltaCodec();
-    if (!codec?.enabled(name)) return runGated(name, args, undefined, signal);
+    if (!codec?.enabled(name)) return runGated(name, args, undefined, queryOptions);
 
     const viewKey = codec.viewKey(name, args);
     const cursor = codec.cursorFor(viewKey);
-    const raw = await runGated(name, args, cursor ?? '', signal);
+    const raw = await runGated(name, args, cursor ?? '', queryOptions);
     const dec = codec.decodeResult(viewKey, raw);
     if (dec.refetchFull && cursor !== undefined) {
-      const full = await runGated(name, args, '', signal);
+      const full = await runGated(name, args, '', queryOptions);
       const dec2 = codec.decodeResult(viewKey, full);
       return { rows: dec2.rows, version: full.version };
     }
@@ -566,4 +642,8 @@ export function getFetchGate(restEndpoint: string, tokenQueryParam?: string): Co
 /** Drop every cached fetcher. Test-only; the map is process-wide by design. */
 export function _resetQueryFetchersForTests(): void {
   fetchers.clear();
+  // The endpoint fetcher cache and the origin scheduler registry are both
+  // process-wide. Keep the test reset symmetrical so a capped scheduler from
+  // one test cannot leak into the next endpoint/profile assertion.
+  _resetOriginSchedulersForTests();
 }

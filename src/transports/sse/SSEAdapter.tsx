@@ -68,6 +68,7 @@ import {
   createUsePollingQuery,
   createPrefetchSync,
 } from '../polling/usePollingQuery';
+import { getOriginScheduler } from '../polling/origin-scheduler';
 import {
   createSyncTraceId,
   syncMetrics,
@@ -144,6 +145,15 @@ function SSESubscriber({
     const sseUrl = tokenQueryParam
       ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenQueryParam)}`
       : baseUrl;
+
+    // Account for the consolidated control stream in the same per-origin
+    // budget as finite requests. Extra streams dynamically reduce admission;
+    // bulk/media transports use a separate registration and never consume
+    // this reservation (D-017/P-018).
+    const controlStream = getOriginScheduler(endpoint).registerStream({
+      name: 'control-sse',
+      kind: 'control',
+    });
 
     // Resilience (jitter, zombie watchdog, backoff, escalation, visibility
     // pause) lives in @papercusp/sse's createResilientEventSource. This
@@ -271,6 +281,7 @@ function SSESubscriber({
     return () => {
       syncMetrics.sseDisconnected();
       source.close();
+      controlStream.release();
     };
   }, [endpoint, queryClient, onError, tokenQueryParam, endpointOverride, visibilityPause]);
 

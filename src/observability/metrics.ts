@@ -14,6 +14,8 @@
  * timer and computes deltas.
  */
 
+import type { OriginSchedulerSnapshot } from '../transports/polling/origin-scheduler';
+
 /** One completed (or failed) query request, as kept in the bounded recent-ring. */
 export interface SyncQueryEvent {
   /** Query name, e.g. `plans.list`. */
@@ -193,6 +195,8 @@ export interface SyncMetricsSnapshot {
     bySseName: Record<string, number>;
   };
   transport: SyncTransportSnapshot;
+  /** Live origin-wide scheduler view, when a transport has registered one. */
+  scheduler?: OriginSchedulerSnapshot;
   /** Per-queryName rollup, keyed by query name. */
   byQuery: Record<string, SyncQueryStat>;
   /** Stage-by-stage freshness telemetry. Optional for callers constructing test snapshots. */
@@ -237,6 +241,7 @@ interface MetricsState {
   /** Bounded ring of recent query events (oldest dropped first). */
   recent: SyncQueryEvent[];
   gateProbe: GateProbe | null;
+  schedulerProbe: (() => OriginSchedulerSnapshot) | null;
   stages: {
     byStage: Map<SyncStageName, SyncStageStat>;
     recent: SyncStageSample[];
@@ -272,6 +277,7 @@ const state: MetricsState = {
   byQuery: new Map(),
   recent: [],
   gateProbe: null,
+  schedulerProbe: null,
   stages: {
     byStage: new Map(),
     recent: [],
@@ -413,6 +419,14 @@ export const syncMetrics = {
     state.gateProbe = probe;
   },
   /**
+   * Register the process-pinned origin scheduler's live snapshot. This is a
+   * separate probe from the legacy gate depth so existing consumers keep their
+   * shape while new diagnostics can see streams and per-class queue tails.
+   */
+  registerSchedulerProbe(probe: (() => OriginSchedulerSnapshot) | null): void {
+    state.schedulerProbe = probe;
+  },
+  /**
    * Record that a host's bounded startup IPC assertion gave up. This is a
    * host-level diagnostic rather than a sync request counter, but it belongs
    * in the same inspectable snapshot so a permanently capped session is not
@@ -517,6 +531,12 @@ export const syncMetrics = {
       // A throwing probe must never break the snapshot — report unknown instead.
       live = null;
     }
+    let scheduler: OriginSchedulerSnapshot | undefined;
+    try {
+      scheduler = state.schedulerProbe ? state.schedulerProbe() : undefined;
+    } catch {
+      scheduler = undefined;
+    }
     const byQuery: Record<string, SyncQueryStat> = {};
     for (const [name, stat] of state.byQuery) byQuery[name] = { ...stat };
     const byStage = {} as Record<SyncStageName, SyncStageStat>;
@@ -537,6 +557,7 @@ export const syncMetrics = {
         limit: live ? live.limit : null,
         ...state.transport,
       },
+      ...(scheduler ? { scheduler } : {}),
       byQuery,
       sse: {
         connectedSinceMs:
@@ -578,6 +599,7 @@ export const syncMetrics = {
     state.byQuery.clear();
     state.recent.length = 0;
     state.gateProbe = null;
+    state.schedulerProbe = null;
     resetStageStats();
     nextTraceId = 1;
   },

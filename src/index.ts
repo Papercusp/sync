@@ -29,6 +29,28 @@ export { fetchSyncQuery } from './transports/polling/usePollingQuery';
 // semaphore implementations.
 export { createConcurrencyGate, type ConcurrencyGate } from './transports/polling/concurrency-gate';
 export {
+  ORIGIN_SCHEDULER_CLASSES,
+  OriginSchedulerError,
+  createOriginScheduler,
+  getOriginScheduler,
+  getOriginSchedulerForEndpoint,
+  peekOriginScheduler,
+  normalizeOrigin,
+  _resetOriginSchedulersForTests,
+} from './transports/polling/origin-scheduler';
+export type {
+  OriginScheduler,
+  OriginSchedulerClass,
+  OriginSchedulerClassMetrics,
+  OriginSchedulerOptions,
+  OriginSchedulerOutcome,
+  OriginSchedulerRunOptions,
+  OriginSchedulerSnapshot,
+  OriginSchedulerTaskContext,
+  OriginStreamLease,
+  OriginStreamOptions,
+} from './transports/polling/origin-scheduler';
+export {
   DEFAULT_MAX_IN_FLIGHT,
   CONNECTION_CAPPED_MAX_IN_FLIGHT,
   // Published because a CALLER cannot set its own ceiling correctly without it:

@@ -203,9 +203,24 @@ export function createPrefetchSync(config: PollingConfig, queryClient: QueryClie
   );
   return function prefetchSync(opts: SyncQueryOptions) {
     const { queryName, args = {} } = opts;
+    let coalesceKey: string | undefined;
+    try {
+      coalesceKey = `${queryName}:${JSON.stringify(args)}`;
+    } catch {
+      // TanStack Query will report a useful key error for a non-serializable
+      // argument; do not let metrics/coalescing change that behavior.
+    }
     void queryClient.prefetchQuery({
       queryKey: ['sync', queryName, args],
-      queryFn: ({ signal }) => fetchQuery(queryName, args, { signal }),
+      // Prefetches are background work. They share the origin scheduler with
+      // foreground reads, leave the interactive reservation intact, and can
+      // replace an older queued refresh for the same query key.
+      queryFn: ({ signal }) =>
+        fetchQuery(queryName, args, {
+          signal,
+          requestClass: 'background-sync',
+          ...(coalesceKey ? { coalesceKey } : {}),
+        }),
       staleTime: 30_000,
     });
   };
