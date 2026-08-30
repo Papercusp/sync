@@ -22,6 +22,12 @@ export interface SyncBusEvent {
   name: string;
   args?: unknown;
   data?: unknown[];
+  /** Server event commit timestamp, preserved from the SSE `tsMs` payload. */
+  tsMs?: number;
+  /** Client-local correlation id for freshness stage telemetry. */
+  traceId?: string;
+  /** Client epoch timestamp at which the push callback received the event. */
+  receivedAtMs?: number;
 }
 
 type SyncBusListener = (ev: SyncBusEvent) => void;
