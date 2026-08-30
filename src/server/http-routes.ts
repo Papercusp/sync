@@ -108,8 +108,16 @@ export interface SsePrimitives {
   }) => Response;
 }
 
-function payloadFor(ev: SyncEvent): { name: string; args?: unknown; data?: unknown[] } {
-  const out: { name: string; args?: unknown; data?: unknown[] } = { name: ev.name };
+function payloadFor(ev: SyncEvent): {
+  name: string;
+  args?: unknown;
+  data?: unknown[];
+  tsMs: number;
+} {
+  const out: { name: string; args?: unknown; data?: unknown[]; tsMs: number } = {
+    name: ev.name,
+    tsMs: ev.ts,
+  };
   if (ev.args !== undefined) out.args = ev.args;
   if (ev.data !== undefined) out.data = ev.data;
   return out;
