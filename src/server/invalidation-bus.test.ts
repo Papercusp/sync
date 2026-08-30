@@ -29,6 +29,32 @@ function makeLoopback() {
   return { listen, notify, delivered, deliver: (raw: string) => onMsg?.(raw) };
 }
 
+/** Deterministic timer seam for bridge trailing-edge tests. */
+function makeTimerHarness() {
+  const callbacks = new Map<number, () => void>();
+  let nextId = 1;
+  return {
+    setTimer(fn: () => void, _ms: number): number {
+      const id = nextId++;
+      callbacks.set(id, fn);
+      return id;
+    },
+    clearTimer(handle: unknown): void {
+      callbacks.delete(handle as number);
+    },
+    fireAll(): void {
+      // Snapshot current timers so a callback that re-arms itself is left for
+      // the next explicit tick, just like a real elapsed-time advancement.
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const fn of pending) fn();
+    },
+    get pending(): number {
+      return callbacks.size;
+    },
+  };
+}
+
 describe('invalidation-bus', () => {
   it('subscribe starts the listen source and receives notified events', async () => {
     const clock = { t: 1000 };
@@ -257,11 +283,14 @@ describe('invalidation-bus', () => {
   it('bridged full-bust targets dedupe within the window, like an explicit notifyInvalidate', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
+    const timers = makeTimerHarness();
     const bus = createInvalidationBus({
       listen: lb.listen,
       notify: lb.notify,
       now: () => clock.t,
       dedupeWindowMs: 1000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
       // Mirrors a hot table (e.g. harness_plans) bridged to a full-bust list query.
       bridge: (name) => (name === 'harness_shared.harness_plans.changed' ? ['plans.list'] : []),
     });
@@ -284,11 +313,14 @@ describe('invalidation-bus', () => {
   it('a hot table bridged to several query names throttles each target independently, not cross-suppressed', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
+    const timers = makeTimerHarness();
     const bus = createInvalidationBus({
       listen: lb.listen,
       notify: lb.notify,
       now: () => clock.t,
       dedupeWindowMs: 1000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
       bridge: (name) =>
         name === 'harness_shared.harness_plans.changed'
           ? ['plans.list', 'plans.attention', 'plans.items']
@@ -318,11 +350,14 @@ describe('invalidation-bus', () => {
   it('several source tables bridged to the SAME target are not cross-suppressed', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
+    const timers = makeTimerHarness();
     const bus = createInvalidationBus({
       listen: lb.listen,
       notify: lb.notify,
       now: () => clock.t,
       dedupeWindowMs: 90_000, // the real production default
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
       bridge: (name) =>
         name === 'harness_shared.coord_presence.changed' ||
         name === 'harness_shared.agent_modes.changed'
@@ -362,11 +397,14 @@ describe('invalidation-bus', () => {
   it('shortens one source/query bridge window without weakening a hot source guard', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
+    const timers = makeTimerHarness();
     const bus = createInvalidationBus({
       listen: lb.listen,
       notify: lb.notify,
       now: () => clock.t,
       dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
       bridge: (name) =>
         name === 'harness_shared.coord_presence.changed' ||
         name === 'harness_shared.agent_modes.changed'
@@ -407,14 +445,137 @@ describe('invalidation-bus', () => {
     expect(events.filter((e) => e.name === 'advRoster.list')).toHaveLength(3);
   });
 
+  it('emits the latest bridged scoped target on a bounded trailing edge and replays it by id', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const timers = makeTimerHarness();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      bridge: (name, args) =>
+        name === 'harness_shared.widget.changed'
+          ? [{ name: 'widget.byId', args: { id: String(args?.id ?? '') } }]
+          : [],
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    // The first write is leading-edge immediate.
+    lb.deliver(JSON.stringify({ name: 'harness_shared.widget.changed', args: { id: 'row', version: 1 } }));
+    expect(events.filter((e) => e.name === 'widget.byId').map((e) => e.args)).toEqual([{ id: 'row' }]);
+
+    // A newer write inside the historical 90s floor replaces the pending
+    // payload; it does not create a second immediate fan-out.
+    clock.t = 1100;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.widget.changed', args: { id: 'row', version: 2 } }));
+    expect(events.filter((e) => e.name === 'widget.byId')).toHaveLength(1);
+    expect(timers.pending).toBe(1);
+
+    // The timer is anchored at the first suppressed write (1100), so the
+    // latest state is delivered at 3100, well within the two-second bound.
+    clock.t = 3099;
+    timers.fireAll();
+    expect(events.filter((e) => e.name === 'widget.byId')).toHaveLength(1);
+    clock.t = 3100;
+    timers.fireAll();
+    const trailing = events.filter((e) => e.name === 'widget.byId')[1];
+    expect(trailing).toMatchObject({ args: { id: 'row' }, ts: 1100 });
+    expect(trailing.id).toBeGreaterThan(events[0].id);
+    expect(bus.backfillSince(trailing.id - 1)).toContainEqual(trailing);
+    expect(timers.pending).toBe(0);
+
+    await bus.stop();
+  });
+
+  it('keeps source-aware trailing windows independent during a sustained burst', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const timers = makeTimerHarness();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      bridge: (name) =>
+        name === 'harness_shared.hot.changed' || name === 'harness_shared.rare.changed'
+          ? ['shared.list']
+          : [],
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    // Hot source: leading event, then a sustained stream. The latest hot
+    // source write must be the one emitted by the trailing flush.
+    lb.deliver(JSON.stringify({ name: 'harness_shared.hot.changed', args: { n: 0 } }));
+    clock.t = 1100;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.hot.changed', args: { n: 1 } }));
+    clock.t = 1600;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.hot.changed', args: { n: 2 } }));
+    clock.t = 2100;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.hot.changed', args: { n: 3 } }));
+
+    // Rare source has its own source-keyed leading edge, despite the hot
+    // source still holding its floor.
+    clock.t = 2200;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.rare.changed', args: { n: 9 } }));
+    expect(events.filter((e) => e.name === 'shared.list')).toHaveLength(2);
+
+    // Hot trailing timer was due at 3100 (first suppressed event at 1100).
+    clock.t = 3100;
+    timers.fireAll();
+    const lists = events.filter((e) => e.name === 'shared.list');
+    expect(lists).toHaveLength(3);
+    expect(lists[2]).toMatchObject({ ts: 2100 });
+    expect(timers.pending).toBe(0);
+
+    await bus.stop();
+  });
+
+  it('prunes a delayed trailing event even when newer raw events already occupy the ring', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const timers = makeTimerHarness();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      historyWindowMs: 1_000,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      bridge: (name) => (name === 'harness_shared.widget.changed' ? ['widget.list'] : []),
+    });
+    await bus.subscribe(() => {});
+
+    lb.deliver(JSON.stringify({ name: 'harness_shared.widget.changed' })); // leading bridge at 1000
+    clock.t = 1100;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.widget.changed' })); // pending bridge
+    clock.t = 2201;
+    lb.deliver(JSON.stringify({ name: 'unrelated.changed' })); // newer ring entry
+    clock.t = 3100;
+    timers.fireAll(); // delayed bridge has source ts=1100, now outside retention
+
+    expect(bus.backfillSince(0).map((event) => event.name)).toEqual(['unrelated.changed']);
+    await bus.stop();
+  });
+
   it('bridged SCOPED targets with different args are not cross-suppressed', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
+    const timers = makeTimerHarness();
     const bus = createInvalidationBus({
       listen: lb.listen,
       notify: lb.notify,
       now: () => clock.t,
       dedupeWindowMs: 1000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
       bridge: (name, args) => {
         const id = (args as { id?: unknown } | undefined)?.id;
         return typeof id === 'string' && name === 'harness_shared.widget.changed'

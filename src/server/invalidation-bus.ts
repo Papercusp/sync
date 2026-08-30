@@ -6,8 +6,10 @@
  * SSE subscriber, with:
  *   - a monotonic event id + an in-memory ring buffer for `Last-Event-ID`
  *     reconnect replay (`backfillSince`),
- *   - source-side dedupe so a periodic reconcile sweep that re-emits the
- *     same `(name, args)` doesn't fan out a flicker storm,
+ *   - source-side dedupe for explicit notifies, plus source-aware
+ *     immediate-first/trailing-latest coalescing for bridged targets so a
+ *     periodic reconcile burst cannot fan out a flicker storm or hide its
+ *     final state behind a 90-second floor,
  *   - a 32KB payload cap (oversized → drop `data`, client refetches),
  *   - an optional `bridge` that synthesizes extra events (e.g. a raw
  *     PG-trigger `<schema>.<table>.changed` → the camelCase query names
@@ -90,7 +92,7 @@ export interface CreateInvalidationBusOptions {
   notify: NotifySink;
   /** Ring-buffer retention for reconnect replay. Default 60_000. */
   historyWindowMs?: number;
-  /** Suppress identical notifies within this window. Default 90_000. */
+  /** Suppress identical explicit notifies within this window. Default 90_000. */
   dedupeWindowMs?: number;
   /**
    * Maximum age of a suppressed bridged event before the latest target is
@@ -197,7 +199,11 @@ export function createInvalidationBus(
   opts: CreateInvalidationBusOptions,
 ): InvalidationBus {
   const historyWindowMs = opts.historyWindowMs ?? DEFAULT_HISTORY_WINDOW_MS;
-  const dedupeWindowMs = opts.dedupeWindowMs ?? DEFAULT_DEDUPE_WINDOW_MS;
+  const configuredDedupeWindowMs = opts.dedupeWindowMs;
+  const dedupeWindowMs =
+    configuredDedupeWindowMs === undefined || !Number.isFinite(configuredDedupeWindowMs)
+      ? DEFAULT_DEDUPE_WINDOW_MS
+      : Math.max(0, configuredDedupeWindowMs);
   const bridgeCoalesceWindowMs = normalizeBridgeCoalesceWindow(opts.bridgeCoalesceWindowMs);
   const payloadSizeLimit = opts.payloadSizeLimit ?? DEFAULT_PAYLOAD_SIZE_LIMIT;
   const bridge = opts.bridge ?? (() => [] as const);
@@ -225,7 +231,16 @@ export function createInvalidationBus(
 
   function pruneHistory(): void {
     const cutoff = now() - historyWindowMs;
-    while (history.length > 0 && history[0].ts < cutoff) history.shift();
+    // A trailing bridge event is intentionally emitted after later raw events
+    // may already be in the ring, while retaining the latest source timestamp
+    // for freshness measurement. Do not assume `ts` is sorted by insertion
+    // order; filter every entry so a delayed old event cannot pin newer history
+    // in memory or leak past the replay retention window.
+    let write = 0;
+    for (const event of history) {
+      if (event.ts >= cutoff) history[write++] = event;
+    }
+    history.length = write;
   }
 
   function fanout(ev: SyncEvent): void {
@@ -428,13 +443,9 @@ export function createInvalidationBus(
   }
 
   /**
-   * Source-side dedupe check shared by both fanout producers:
-   *   - `notifyInvalidate()` (explicit app-code invalidate/update calls), and
-   *   - `onMessage()`'s `bridge()` loop (PG-trigger-synthesized targets).
-   * Returns true (and records `ts` against `key`) the first time a given
-   * key fires within `windowMs`; false for a repeat within the window (the
-   * caller should skip that fanout). Centralizing this means a fanout
-   * producer can't accidentally skip dedupe by fanning out directly.
+   * Source-side dedupe for explicit app-code invalidate/update calls.
+   * Bridged targets use `emitBridgedTarget()` above so repeats retain the
+   * latest state for a bounded trailing flush rather than disappearing.
    */
   function shouldFanout(key: string, ts: number, windowMs: number): boolean {
     const last = recentNotifies.get(key);
