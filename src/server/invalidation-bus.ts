@@ -26,6 +26,13 @@
  * out to subscribers — so multi-process deployments all see every event.
  */
 
+import {
+  decideWake,
+  emptyFloorState,
+  type Fire,
+  type FloorState,
+} from '@papercusp/debounce-coalesce';
+
 export interface SyncEvent {
   id: number;
   ts: number;
@@ -85,6 +92,13 @@ export interface CreateInvalidationBusOptions {
   historyWindowMs?: number;
   /** Suppress identical notifies within this window. Default 90_000. */
   dedupeWindowMs?: number;
+  /**
+   * Maximum age of a suppressed bridged event before the latest target is
+   * emitted on the trailing edge. The value is hard-capped at two seconds so
+   * a hot source can never leave the final write hidden behind the historical
+   * 90-second burst window. Default 2_000.
+   */
+  bridgeCoalesceWindowMs?: number;
   /** Serialized-payload byte cap; over → drop `data`. Default 32768. */
   payloadSizeLimit?: number;
   /**
@@ -113,6 +127,9 @@ export interface CreateInvalidationBusOptions {
   ) => number | undefined;
   /** Injectable clock (testing). Default Date.now. */
   now?: () => number;
+  /** Injectable timer seams (testing). Defaults to setTimeout/clearTimeout. */
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
   onError?: (where: string, err: unknown) => void;
   log?: (msg: string) => void;
 }
@@ -138,7 +155,30 @@ export interface InvalidationBus {
 
 const DEFAULT_HISTORY_WINDOW_MS = 60_000;
 const DEFAULT_DEDUPE_WINDOW_MS = 90_000;
+/** The normal-path freshness bound for a suppressed bridged target. */
+export const DEFAULT_BRIDGE_COALESCE_WINDOW_MS = 2_000;
 const DEFAULT_PAYLOAD_SIZE_LIMIT = 32 * 1024;
+
+/** Keep the normal-path trailing bound an invariant, even if a host supplies a bad value. */
+function normalizeBridgeCoalesceWindow(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_BRIDGE_COALESCE_WINDOW_MS;
+  return Math.min(DEFAULT_BRIDGE_COALESCE_WINDOW_MS, Math.max(0, value));
+}
+
+interface BridgeCandidate {
+  name: string;
+  ts: number;
+  args?: Record<string, unknown>;
+}
+
+interface BridgeWindow {
+  /** Shared floor/coalesce state; pending is kept at length zero or one. */
+  floor: FloorState<BridgeCandidate>;
+  /** Effective source-side floor for this source/target pair. */
+  dedupeWindowMs: number;
+  /** A scheduled trailing flush, or null when there is no pending candidate. */
+  timer: unknown | null;
+}
 
 /** Tiny non-crypto hash (FNV-1a, 32-bit) for the dedupe key's data leg.
  *  The key needs *equality* on the payload, not the payload bytes: storing
@@ -158,9 +198,12 @@ export function createInvalidationBus(
 ): InvalidationBus {
   const historyWindowMs = opts.historyWindowMs ?? DEFAULT_HISTORY_WINDOW_MS;
   const dedupeWindowMs = opts.dedupeWindowMs ?? DEFAULT_DEDUPE_WINDOW_MS;
+  const bridgeCoalesceWindowMs = normalizeBridgeCoalesceWindow(opts.bridgeCoalesceWindowMs);
   const payloadSizeLimit = opts.payloadSizeLimit ?? DEFAULT_PAYLOAD_SIZE_LIMIT;
   const bridge = opts.bridge ?? (() => [] as const);
   const now = opts.now ?? (() => Date.now());
+  const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = opts.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   const onError = opts.onError ?? (() => {});
   const log = opts.log ?? (() => {});
 
@@ -168,6 +211,14 @@ export function createInvalidationBus(
   const history: SyncEvent[] = [];
   const subscribers = new Set<{ send: (e: SyncEvent) => void }>();
   const recentNotifies = new Map<string, number>();
+  /**
+   * Per-(source,target,args) leading/trailing state. The floor state is from
+   * the shared debounce primitive, but each entry intentionally keeps only
+   * ONE pending fire: the latest target is what matters, and retaining every
+   * row in a sustained trigger burst would turn the coalescer into a memory
+   * amplifier.
+   */
+  const bridgeWindows = new Map<string, BridgeWindow>();
   const inflightNotifies = new Set<Promise<unknown>>();
 
   let startPromise: Promise<void> | null = null;
@@ -185,6 +236,115 @@ export function createInvalidationBus(
         s.send(ev);
       } catch {
         /* best-effort — one bad subscriber must not break the fan-out */
+      }
+    }
+  }
+
+  function cancelBridgeTimer(entry: BridgeWindow): void {
+    if (entry.timer === null) return;
+    clearTimer(entry.timer);
+    entry.timer = null;
+  }
+
+  function scheduleBridgeFlush(key: string, entry: BridgeWindow, dueAt: number): void {
+    // Keep the timer anchored to the FIRST suppressed fire. Re-arming it from
+    // every subsequent event would be a trailing debounce that can postpone a
+    // sustained burst forever, which is exactly the stale-final-state failure
+    // this coalescer is meant to remove.
+    cancelBridgeTimer(entry);
+    const delayMs = Math.max(0, dueAt - now());
+    const handle = setTimer(() => flushBridge(key), delayMs);
+    entry.timer = handle;
+    // Node timers should not keep a host alive during shutdown. Browser timer
+    // handles do not expose unref, so feature-detect it rather than narrowing
+    // the injected timer type.
+    const maybeUnref = handle as { unref?: () => void } | null;
+    maybeUnref?.unref?.();
+  }
+
+  function flushBridge(key: string): void {
+    const entry = bridgeWindows.get(key);
+    if (!entry) return;
+    entry.timer = null;
+    const at = now();
+    const pending = entry.floor.pending;
+    if (pending.length === 0) return;
+
+    const decision = decideWake({
+      lastWokenAt: entry.floor.lastWokenAt,
+      pending,
+      now: at,
+      cfg: {
+        minSleepMs: entry.dedupeWindowMs,
+        maxStalenessMs: bridgeCoalesceWindowMs,
+        leadingEdge: true,
+      },
+    });
+    entry.floor = decision.state;
+    if (decision.wake) {
+      const latest = decision.coalesced.latest.payload;
+      fanout({ id: nextId++, name: latest.name, ts: latest.ts, ...(latest.args !== undefined ? { args: latest.args } : {}) });
+      return;
+    }
+    if (decision.dueAt !== null) scheduleBridgeFlush(key, entry, decision.dueAt);
+  }
+
+  function emitBridgedTarget(
+    key: string,
+    candidate: BridgeCandidate,
+    effectiveDedupeWindowMs: number,
+  ): void {
+    let entry = bridgeWindows.get(key);
+    if (!entry) {
+      entry = {
+        floor: emptyFloorState<BridgeCandidate>(),
+        dedupeWindowMs: effectiveDedupeWindowMs,
+        timer: null,
+      };
+      bridgeWindows.set(key, entry);
+    } else {
+      entry.dedupeWindowMs = effectiveDedupeWindowMs;
+    }
+
+    // Keep the pending fire's anchor time stable while replacing its payload
+    // with the newest target. This gives us trailing-*latest* semantics with a
+    // single bounded object instead of an unbounded array of row writes.
+    const previous = entry.floor.pending[0];
+    const pending: Fire<BridgeCandidate>[] = [
+      previous
+        ? { at: previous.at, payload: candidate }
+        : { at: candidate.ts, payload: candidate },
+    ];
+    const decision = decideWake({
+      lastWokenAt: entry.floor.lastWokenAt,
+      pending,
+      now: candidate.ts,
+      cfg: {
+        minSleepMs: effectiveDedupeWindowMs,
+        maxStalenessMs: bridgeCoalesceWindowMs,
+        leadingEdge: true,
+      },
+    });
+    entry.floor = decision.state;
+    if (decision.wake) {
+      cancelBridgeTimer(entry);
+      const latest = decision.coalesced.latest.payload;
+      fanout({ id: nextId++, name: latest.name, ts: latest.ts, ...(latest.args !== undefined ? { args: latest.args } : {}) });
+      return;
+    }
+    if (decision.dueAt !== null) scheduleBridgeFlush(key, entry, decision.dueAt);
+  }
+
+  function pruneBridgeWindows(ts: number): void {
+    // A quiet source/target pair is retained only for its dedupe floor. The
+    // size guard keeps a write storm over many distinct targets from turning
+    // this diagnostic map into an unbounded cache.
+    if (bridgeWindows.size < 200) return;
+    for (const [key, entry] of bridgeWindows) {
+      const last = entry.floor.lastWokenAt;
+      if (entry.floor.pending.length === 0 && last !== null && ts - last >= entry.dedupeWindowMs) {
+        cancelBridgeTimer(entry);
+        bridgeWindows.delete(key);
       }
     }
   }
@@ -208,56 +368,14 @@ export function createInvalidationBus(
       data: Array.isArray(parsed.data) ? parsed.data : undefined,
     };
     fanout(ev);
+    pruneBridgeWindows(ev.ts);
 
     // Bridge: synthesize additional events from the raw (name, args). A bare
-    // string target full-busts (no `args` → client invalidates every cache
-    // entry under that name); a `{ name, args }` target SCOPES the invalidate
-    // to those args (e.g. just the changed row's key, derived from args.id).
-    //
-    // These targets fire once PER ROW WRITE to the source table (a PG trigger,
-    // not app code), so a hot table bridged to several query names (e.g.
-    // harness_plans -> plans.list/get/items/attention/search/byHive/schedule/
-    // scheduledOccurrences) fans out that many full-bust broadcasts on EVERY
-    // write — with no throttling of its own. Route each synthesized target
-    // through the SAME source-side dedupe explicit notifyInvalidate() calls
-    // get: this is exactly the "chatty per-row reconcile" case the bus's
-    // dedupeWindowMs doc-comment describes, and until this was added it was
-    // the one fanout path that bypassed it entirely (WI-840 — a bridged table
-    // under sustained multi-agent write load produced an unthrottled
-    // invalidate storm: thousands of full re-fetches/hour from every live
-    // subscriber, scaling with fleet write-rate rather than viewer count).
-    //
-    // The dedupe key is per (SOURCE TABLE, target name, target args) — NOT per
-    // target alone. Several source tables commonly bridge to ONE target name
-    // (advRoster.list is fed by coord_presence, agent_modes, adv_sessions and
-    // work_items), and a target-only key lets the CHATTIEST source hold that
-    // shared window continuously, silently swallowing every other source's
-    // events. Measured 2026-08-09 (WI-37446): a mode written to
-    // harness_shared.agent_modes took 90s to reach the UI because coord_presence
-    // — ~1999 writes/10min against the same advRoster.list key — never let the
-    // window lapse, so the chat mode pill showed a stale CONTRACT for a minute
-    // and a half while the database was already correct.
-    //
-    // Keying by source restores per-source leading-edge delivery (a rare but
-    // meaningful write is never hidden behind a hot neighbour) and keeps
-    // WI-840's cap exactly as designed: each source still fans out at most once
-    // per window per target, so the per-name bound moves from 1 to (number of
-    // DISTINCT source tables bridged to that name) — a small static constant
-    // read off the bridge map, never a function of write rate. Write rate is
-    // what made WI-840 a storm; a static fan-in factor is not.
-    //
-    // ⚠ The source NAME only — never the source's ARGS. The trigger payload
-    // carries the changed row's PK, so folding args in would make every row
-    // write a unique key and disable bridged dedupe entirely, restoring the
-    // exact storm this exists to prevent. Guarded by the "bridged full-bust
-    // targets dedupe within the window" test, which fires three DIFFERENT row
-    // ids and requires a single fanout.
-    //
-    // The `bridge:` prefix namespaces these away from notifyInvalidate()'s
-    // `name|args|dataHash` keys, so a bridged target and an explicit app-code
-    // invalidate of the SAME query name cannot collide in recentNotifies —
-    // the same reasoning one layer out: a chatty trigger must not be able to
-    // swallow an explicit invalidate either.
+    // string target full-busts (no `args`); a `{ name, args }` target scopes the
+    // invalidate to that cache key. Each source/target/args tuple gets a
+    // leading immediate event and a bounded trailing-latest event through the
+    // shared floor primitive. The source name stays in the key so a hot source
+    // cannot hold another source's control-plane update behind its floor.
     for (const target of bridge(parsed.name, ev.args)) {
       const name = typeof target === 'string' ? target : target.name;
       const targetArgs = typeof target === 'string' ? undefined : target.args;
@@ -267,10 +385,11 @@ export function createInvalidationBus(
         targetDedupeWindowMs === undefined || !Number.isFinite(targetDedupeWindowMs)
           ? dedupeWindowMs
           : Math.max(0, targetDedupeWindowMs);
-      if (!shouldFanout(key, ev.ts, effectiveDedupeWindowMs)) continue;
-      const bridged: SyncEvent = { id: nextId++, ts: ev.ts, name };
-      if (targetArgs !== undefined) bridged.args = targetArgs;
-      fanout(bridged);
+      emitBridgedTarget(
+        key,
+        { name, ts: ev.ts, ...(targetArgs !== undefined ? { args: targetArgs } : {}) },
+        effectiveDedupeWindowMs,
+      );
     }
   }
 
@@ -380,6 +499,8 @@ export function createInvalidationBus(
    */
   async function stop(): Promise<void> {
     subscribers.clear();
+    for (const entry of bridgeWindows.values()) cancelBridgeTimer(entry);
+    bridgeWindows.clear();
     if (inflightNotifies.size > 0) {
       await Promise.allSettled([...inflightNotifies]);
     }
