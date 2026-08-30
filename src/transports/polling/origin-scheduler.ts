@@ -18,7 +18,7 @@
  * control-origin reservation (the BYOC reverse-connector contract).
  */
 
-import type { ConcurrencyGate } from './concurrency-gate';
+import { createConcurrencyGate, type ConcurrencyGate } from './concurrency-gate';
 
 export const ORIGIN_SCHEDULER_CLASSES = [
   'interactive-control',
@@ -351,6 +351,11 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
   let protocol = options.protocol ?? null;
   let closed = false;
   let active = 0;
+  // The class-aware picker below decides which waiter wins. The established
+  // gate still owns the actual permit counter and release pump, keeping this
+  // richer scheduler an extension of the generic gate rather than a second
+  // semaphore implementation.
+  const permitGate = createConcurrencyGate(baseLimit);
   const queues: Record<OriginSchedulerClass, QueueEntry<unknown>[]> = {
     'interactive-control': [],
     'foreground-read': [],
@@ -374,6 +379,11 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
 
   const effectiveLimit = (): number =>
     Math.max(1, baseLimit - Math.max(0, countedStreams() - baselineStreams));
+
+  const syncPermitLimit = (): void => {
+    const next = effectiveLimit();
+    if (permitGate.limit !== next) permitGate.setLimit(next);
+  };
 
   const interactiveReserve = (): number => {
     // A cap of one cannot reserve a slot and also admit useful non-interactive
@@ -482,10 +492,13 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
   };
 
   const pump = (): void => {
+    syncPermitLimit();
     updateQueuedMetrics();
     while (!closed) {
       const next = chooseNext();
       if (!next) break;
+      const permitRelease = permitGate.tryAcquire();
+      if (!permitRelease) break;
       removeFromQueue(next);
       // Reserve the scheduler's accounting slot synchronously before handing
       // execution to the shared gate. This keeps the priority picker from
@@ -493,7 +506,16 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
       // microtask.
       active++;
       activeByClass[next.requestClass]++;
-      void execute(next).catch((error) => {
+      let reservationReleased = false;
+      const releaseReservation = (): void => {
+        if (reservationReleased) return;
+        reservationReleased = true;
+        permitRelease();
+        active--;
+        activeByClass[next.requestClass]--;
+        classMetrics[next.requestClass].inFlight = activeByClass[next.requestClass];
+      };
+      void execute(next, releaseReservation).catch((error) => {
         // `execute` handles task failures itself; this is only a defensive
         // guard for an unexpected semaphore failure.
         if (!next.settled) {
@@ -503,9 +525,7 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
           classMetrics[next.requestClass].failures++;
           next.reject(error);
         }
-        active--;
-        activeByClass[next.requestClass]--;
-        classMetrics[next.requestClass].inFlight = activeByClass[next.requestClass];
+        releaseReservation();
         pump();
       });
     }
@@ -523,14 +543,12 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
     },
   });
 
-  const execute = async (entry: QueueEntry<unknown>): Promise<void> => {
+  const execute = async (entry: QueueEntry<unknown>, releaseReservation: () => void): Promise<void> => {
     let startedAt: number | null = null;
     let metrics: MutableClassMetrics | null = null;
     if (entry.settled || closed) {
       if (!entry.settled) settleQueued(entry, new OriginSchedulerError('closed', 'origin scheduler is closed', entry.requestClass), 'rejected');
-      active--;
-      activeByClass[entry.requestClass]--;
-      classMetrics[entry.requestClass].inFlight = activeByClass[entry.requestClass];
+      releaseReservation();
       pump();
       return;
     }
@@ -541,9 +559,7 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
         new OriginSchedulerError('timeout', `scheduler deadline elapsed before admission`, entry.requestClass),
         'timeout',
       );
-      active--;
-      activeByClass[entry.requestClass]--;
-      classMetrics[entry.requestClass].inFlight = activeByClass[entry.requestClass];
+      releaseReservation();
       pump();
       return;
     }
@@ -617,9 +633,7 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
       if (timer !== undefined) clearTimeout(timer);
       entry.cancelReject = undefined;
       entry.timeoutReject = undefined;
-      active--;
-      activeByClass[entry.requestClass]--;
-      metrics.inFlight = activeByClass[entry.requestClass];
+      releaseReservation();
       if (metrics && startedAt !== null) {
         const requestMs = Math.max(0, now() - startedAt);
         metrics.requestMsTotal += requestMs;
@@ -822,6 +836,7 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
     setLimit(next: number): void {
       baseLimit = positiveInt(next, baseLimit);
       reservedInteractive = Math.min(reservedInteractive, Math.max(0, baseLimit - 1));
+      syncPermitLimit();
       pump();
     },
     setProtocol(next: string | null | undefined): void {
@@ -847,6 +862,24 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
         for (const entry of [...queues[requestClass]]) settleQueued(entry, error, 'rejected');
       }
       streams.clear();
+    },
+    tryAcquire(signal?: AbortSignal): (() => void) | null {
+      syncPermitLimit();
+      const releasePermit = permitGate.tryAcquire(signal);
+      if (!releasePermit) return null;
+      active++;
+      activeByClass['foreground-read']++;
+      classMetrics['foreground-read'].inFlight = activeByClass['foreground-read'];
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        releasePermit();
+        active--;
+        activeByClass['foreground-read']--;
+        classMetrics['foreground-read'].inFlight = activeByClass['foreground-read'];
+        pump();
+      };
     },
     get limit() {
       return effectiveLimit();

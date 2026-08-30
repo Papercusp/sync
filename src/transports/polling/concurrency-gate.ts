@@ -50,6 +50,15 @@ export interface ConcurrencyGate {
    * same signal is passed to `fetch`).
    */
   run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T>;
+  /**
+   * Synchronously reserve a slot when one is immediately available. Returns a
+   * one-shot release function, or null when the caller must remain queued.
+   *
+   * This narrow primitive lets richer schedulers choose *which* class to admit
+   * while reusing this gate's slot accounting and release/pump lifecycle. It
+   * never bypasses an existing FIFO waiter.
+   */
+  tryAcquire(signal?: AbortSignal): (() => void) | null;
   /** Retune the cap at runtime; frees waiters immediately when raised. */
   setLimit(next: number): void;
   /** Max concurrent `fn` executions. */
@@ -124,6 +133,17 @@ export function createConcurrencyGate(limit: number): ConcurrencyGate {
         active -= 1;
         pump();
       }
+    },
+    tryAcquire(signal?: AbortSignal): (() => void) | null {
+      if (signal?.aborted || active >= max || waiters.length > 0) return null;
+      active += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        active -= 1;
+        pump();
+      };
     },
     setLimit(next: number): void {
       max = normalizeLimit(next);
