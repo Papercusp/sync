@@ -12,6 +12,7 @@ import {
   SYNC_STAGE_NAMES,
   createSyncTraceId,
 } from './metrics';
+import { createOriginScheduler } from '../transports/polling/origin-scheduler';
 
 beforeEach(() => syncMetrics.__resetForTests());
 
@@ -168,6 +169,21 @@ describe('transport metrics (P-003b — the gate depth nothing outside tests rea
     expect(s.transport.inFlight).toBeNull();
     expect(s.byQuery).toEqual({});
     expect(syncMetrics.recentQueries()).toEqual([]);
+  });
+
+  it('publishes the live origin scheduler snapshot beside legacy transport depth', () => {
+    const scheduler = createOriginScheduler({ limit: 3, origin: 'https://metrics.example' });
+    syncMetrics.registerSchedulerProbe(() => scheduler.snapshot());
+    const lease = scheduler.registerStream({ name: 'control', kind: 'control' });
+    const snapshot = syncMetrics.snapshot();
+    expect(snapshot.scheduler).toMatchObject({
+      origin: 'https://metrics.example',
+      streams: 1,
+      byClass: expect.objectContaining({
+        'interactive-control': expect.objectContaining({ queued: 0, inFlight: 0 }),
+      }),
+    });
+    lease.release();
   });
 });
 
