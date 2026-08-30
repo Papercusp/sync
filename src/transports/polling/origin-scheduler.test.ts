@@ -145,6 +145,53 @@ describe('createOriginScheduler', () => {
     expect(snapshot.protocol).toBe('h1');
     expect(snapshot.byClass['interactive-control']).toMatchObject({ completed: 1, bytes: 42 });
   });
+
+  it('does not let compatibility tryAcquire bypass a queued class-limited task', async () => {
+    const scheduler = createOriginScheduler({ limit: 3, maxBackground: 1, requestTimeoutMs: 1_000 });
+    const hold = deferred<void>();
+    const started: string[] = [];
+    const running = scheduler.run(async () => {
+      started.push('running');
+      await hold.promise;
+    }, { class: 'background-sync' });
+    await tick();
+
+    const queued = scheduler.run(async () => {
+      started.push('queued');
+      return 'queued';
+    }, { class: 'background-sync' });
+    await tick();
+    expect(scheduler.queued).toBe(1);
+
+    // The underlying permit has spare capacity, but the queued background
+    // entry is blocked by its class ceiling. An unclassified compatibility
+    // reservation must not jump ahead of it.
+    expect(scheduler.tryAcquire()).toBeNull();
+    expect(started).toEqual(['running']);
+
+    hold.resolve();
+    await expect(running).resolves.toBeUndefined();
+    await expect(queued).resolves.toBe('queued');
+  });
+
+  it('keeps a replacement stream registration alive when an old lease releases', () => {
+    const scheduler = createOriginScheduler({ limit: 3, baselineStreams: 1 });
+    const first = scheduler.registerStream({ id: 'control', kind: 'control' });
+    const replacement = scheduler.registerStream({ id: 'control', kind: 'standing' });
+
+    expect(scheduler.snapshot()).toMatchObject({ streams: 1, countedStreams: 1, limit: 3 });
+    first.release();
+    expect(scheduler.snapshot()).toMatchObject({ streams: 1, countedStreams: 1, limit: 3 });
+    replacement.release();
+    expect(scheduler.snapshot()).toMatchObject({ streams: 0, countedStreams: 0, limit: 3 });
+  });
+
+  it('rejects compatibility reservations after close', () => {
+    const scheduler = createOriginScheduler({ limit: 2 });
+    scheduler.close();
+    expect(scheduler.tryAcquire()).toBeNull();
+    expect(scheduler.inFlight).toBe(0);
+  });
 });
 
 describe('getOriginScheduler', () => {
