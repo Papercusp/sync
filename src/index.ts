@@ -24,6 +24,10 @@ export {
 } from './lazy-with-retry';
 export { useSyncQuery, useSyncMutate, useSyncPrefetch, useSyncContext, SyncContext } from './SyncContext';
 export { fetchSyncQuery } from './transports/polling/usePollingQuery';
+// Domain-neutral FIFO/abort-aware admission gate. Server-side consumers use
+// the same primitive as polling hydration instead of growing parallel ad-hoc
+// semaphore implementations.
+export { createConcurrencyGate, type ConcurrencyGate } from './transports/polling/concurrency-gate';
 export {
   DEFAULT_MAX_IN_FLIGHT,
   CONNECTION_CAPPED_MAX_IN_FLIGHT,
