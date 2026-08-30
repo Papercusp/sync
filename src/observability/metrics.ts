@@ -28,9 +28,86 @@ export interface SyncQueryEvent {
   bytes: number;
   /** 'ok' | 'error' | 'timeout' | 'aborted'. */
   outcome: SyncQueryOutcome;
+  /** Correlates the request with the later React commit/frame stages. */
+  traceId?: string;
+  /** Stage timings captured by the writers on this request. Every duration is ms. */
+  stages?: SyncStageTimings;
 }
 
 export type SyncQueryOutcome = 'ok' | 'error' | 'timeout' | 'aborted';
+
+/**
+ * The freshness stages are deliberately a closed set. Keep the names and the
+ * `*Ms` suffix stable: dashboards and recurrence tests use this contract to
+ * prevent a writer from silently changing units (for example, seconds → ms).
+ */
+export const SYNC_STAGE_NAMES = [
+  'commit',
+  'eventReceipt',
+  'schedulerWait',
+  'resolver',
+  'transfer',
+  'parseCache',
+  'reactCommit',
+  'updateToScreen',
+] as const;
+
+export type SyncStageName = (typeof SYNC_STAGE_NAMES)[number];
+
+/** Per-request stage values. Timestamp fields are instants; duration fields are milliseconds. */
+export interface SyncStageTimings {
+  /** Server-side event commit/emit epoch timestamp (`SyncEvent.ts`). */
+  committedAtMs?: number;
+  /** Client-side event receipt epoch timestamp. */
+  eventReceivedAtMs?: number;
+  schedulerWaitMs?: number;
+  resolverMs?: number;
+  transferMs?: number;
+  parseCacheMs?: number;
+  reactCommitMs?: number;
+  updateToScreenMs?: number;
+}
+
+/** One bounded stage sample. `unit` is explicit so consumers cannot guess the scale. */
+export interface SyncStageSample {
+  stage: SyncStageName;
+  unit: 'ms';
+  durationMs: number;
+  measuredAtMs: number;
+  queryName?: string;
+  traceId?: string;
+}
+
+export interface SyncStageStat {
+  unit: 'ms';
+  count: number;
+  durationMsTotal: number;
+  durationMsMax: number;
+  lastDurationMs: number | null;
+}
+
+export interface SyncStageSnapshot {
+  unit: 'ms';
+  byStage: Record<SyncStageName, SyncStageStat>;
+  recent: SyncStageSample[];
+  /** Samples rejected because a writer supplied a non-finite/negative duration. */
+  invalidSamples: number;
+}
+
+/** Server timing metadata carried alongside a successful REST query response. */
+export interface SyncServerTiming {
+  unit: 'ms';
+  resolverStartedAtMs: number;
+  resolverCompletedAtMs: number;
+  resolverMs: number;
+}
+
+/** Client-side trace carried through the query cache to React's commit/frame writers. */
+export interface SyncQueryTiming extends SyncStageTimings {
+  traceId: string;
+  /** Monotonic timestamp at which parse/cache handoff completed. */
+  parseCacheEndedAtMs: number;
+}
 
 /** Per-queryName rollup — the "which query costs what" view. */
 export interface SyncQueryStat {
@@ -118,6 +195,8 @@ export interface SyncMetricsSnapshot {
   transport: SyncTransportSnapshot;
   /** Per-queryName rollup, keyed by query name. */
   byQuery: Record<string, SyncQueryStat>;
+  /** Stage-by-stage freshness telemetry. Optional for callers constructing test snapshots. */
+  stages?: SyncStageSnapshot;
 }
 
 /** Live gate reader, registered by the transport that owns the gate. */
@@ -158,6 +237,11 @@ interface MetricsState {
   /** Bounded ring of recent query events (oldest dropped first). */
   recent: SyncQueryEvent[];
   gateProbe: GateProbe | null;
+  stages: {
+    byStage: Map<SyncStageName, SyncStageStat>;
+    recent: SyncStageSample[];
+    invalidSamples: number;
+  };
 }
 
 const freshTransport = (): MetricsState['transport'] => ({
@@ -188,10 +272,43 @@ const state: MetricsState = {
   byQuery: new Map(),
   recent: [],
   gateProbe: null,
+  stages: {
+    byStage: new Map(),
+    recent: [],
+    invalidSamples: 0,
+  },
 };
+
+const STAGE_RING_SIZE = 400;
+
+function freshStageStat(): SyncStageStat {
+  return {
+    unit: 'ms',
+    count: 0,
+    durationMsTotal: 0,
+    durationMsMax: 0,
+    lastDurationMs: null,
+  };
+}
+
+function resetStageStats(): void {
+  state.stages.byStage.clear();
+  for (const stage of SYNC_STAGE_NAMES) state.stages.byStage.set(stage, freshStageStat());
+  state.stages.recent.length = 0;
+  state.stages.invalidSamples = 0;
+}
+
+resetStageStats();
 
 const now = (): number =>
   typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+let nextTraceId = 1;
+
+/** Make a bounded, page-local correlation id for a sync freshness trace. */
+export function createSyncTraceId(prefix = 'sync'): string {
+  return `${prefix}-${nextTraceId++}`;
+}
 
 export const syncMetrics = {
   // SSE lifecycle
@@ -204,15 +321,30 @@ export const syncMetrics = {
   sseReconnectAttempt(): void {
     state.sse.reconnectCount++;
   },
-  sseEventReceived(byteLen: number, serverEmittedAtMs?: number): void {
+  sseEventReceived(
+    byteLen: number,
+    serverEmittedAtMs?: number,
+    meta?: { queryName?: string; traceId?: string; receivedAtMs?: number },
+  ): void {
     state.sse.eventsReceived++;
     state.sse.bytesReceived += byteLen;
-    if (serverEmittedAtMs !== undefined) {
+    if (serverEmittedAtMs !== undefined && Number.isFinite(serverEmittedAtMs)) {
       // Server uses Date.now(); we use Date.now() here too so the math lines up
       // even though performance.now() is preferred elsewhere. Clock skew between
       // client and server makes this approximate; it's still useful for trends.
-      const deltaMs = Date.now() - serverEmittedAtMs;
+      const receivedAtMs = meta?.receivedAtMs ?? Date.now();
+      const deltaMs = receivedAtMs - serverEmittedAtMs;
       state.sse.lastEventLatencyMs = deltaMs >= 0 ? deltaMs : 0;
+      this.recordStage('commit', 0, {
+        queryName: meta?.queryName,
+        traceId: meta?.traceId,
+        measuredAtMs: serverEmittedAtMs,
+      });
+      this.recordStage('eventReceipt', state.sse.lastEventLatencyMs, {
+        queryName: meta?.queryName,
+        traceId: meta?.traceId,
+        measuredAtMs: receivedAtMs,
+      });
     }
   },
   // Cache events
@@ -260,6 +392,45 @@ export const syncMetrics = {
     state.ipcAssertLastClient = lastClient;
   },
   /**
+   * Record one freshness stage. All accepted values are explicitly milliseconds;
+   * invalid writer values are counted and dropped rather than becoming plausible
+   * telemetry with an unknown unit.
+   */
+  recordStage(
+    stage: SyncStageName,
+    durationMs: number,
+    meta: { queryName?: string; traceId?: string; measuredAtMs?: number } = {},
+  ): void {
+    if (!SYNC_STAGE_NAMES.includes(stage) || !Number.isFinite(durationMs) || durationMs < 0) {
+      state.stages.invalidSamples++;
+      return;
+    }
+    const measuredAtMs = meta.measuredAtMs ?? now();
+    if (!Number.isFinite(measuredAtMs)) {
+      state.stages.invalidSamples++;
+      return;
+    }
+    const stat = state.stages.byStage.get(stage) ?? freshStageStat();
+    stat.count++;
+    stat.durationMsTotal += durationMs;
+    stat.durationMsMax = Math.max(stat.durationMsMax, durationMs);
+    stat.lastDurationMs = durationMs;
+    state.stages.byStage.set(stage, stat);
+    state.stages.recent.push({
+      stage,
+      unit: 'ms',
+      durationMs,
+      measuredAtMs,
+      ...(meta.queryName ? { queryName: meta.queryName } : {}),
+      ...(meta.traceId ? { traceId: meta.traceId } : {}),
+    });
+    if (state.stages.recent.length > STAGE_RING_SIZE) state.stages.recent.shift();
+  },
+  /** A copy of the bounded stage ring, oldest first. */
+  recentStages(): SyncStageSample[] {
+    return state.stages.recent.slice();
+  },
+  /**
    * Record one completed query request. Called from the transport's gated path
    * so `waitMs` is the REAL queue wait — the interval the user spends waiting
    * for permission to make a request, which no previous counter exposed.
@@ -290,6 +461,37 @@ export const syncMetrics = {
     if (ev.requestMs > stat.requestMsMax) stat.requestMsMax = ev.requestMs;
     if (ev.outcome === 'error' || ev.outcome === 'timeout') stat.failures++;
 
+    const stages = ev.stages ?? {};
+    // The scheduler writer is the query event itself, so retain the existing
+    // waitMs field as the compatibility source of truth.
+    this.recordStage('schedulerWait', stages.schedulerWaitMs ?? ev.waitMs, {
+      queryName: ev.name,
+      traceId: ev.traceId,
+    });
+    if (stages.resolverMs !== undefined) {
+      this.recordStage('resolver', stages.resolverMs, { queryName: ev.name, traceId: ev.traceId });
+    }
+    if (stages.transferMs !== undefined) {
+      this.recordStage('transfer', stages.transferMs, { queryName: ev.name, traceId: ev.traceId });
+    }
+    if (stages.parseCacheMs !== undefined) {
+      this.recordStage('parseCache', stages.parseCacheMs, { queryName: ev.name, traceId: ev.traceId });
+    }
+    if (stages.committedAtMs !== undefined) {
+      this.recordStage('commit', 0, {
+        queryName: ev.name,
+        traceId: ev.traceId,
+        measuredAtMs: stages.committedAtMs,
+      });
+    }
+    if (stages.eventReceivedAtMs !== undefined && stages.committedAtMs !== undefined) {
+      this.recordStage(
+        'eventReceipt',
+        Math.max(0, stages.eventReceivedAtMs - stages.committedAtMs),
+        { queryName: ev.name, traceId: ev.traceId, measuredAtMs: stages.eventReceivedAtMs },
+      );
+    }
+
     state.recent.push(ev);
     if (state.recent.length > SYNC_QUERY_RING_SIZE) state.recent.shift();
   },
@@ -309,6 +511,10 @@ export const syncMetrics = {
     }
     const byQuery: Record<string, SyncQueryStat> = {};
     for (const [name, stat] of state.byQuery) byQuery[name] = { ...stat };
+    const byStage = {} as Record<SyncStageName, SyncStageStat>;
+    for (const stage of SYNC_STAGE_NAMES) {
+      byStage[stage] = { ...(state.stages.byStage.get(stage) ?? freshStageStat()) };
+    }
     return {
       takenAtMs: now(),
       ...(state.ipcAssertTimedOut === undefined
@@ -337,6 +543,12 @@ export const syncMetrics = {
         ...state.invalidations,
         bySseName: Object.fromEntries(state.invalidationsBySseName),
       },
+      stages: {
+        unit: 'ms',
+        byStage,
+        recent: state.stages.recent.slice(),
+        invalidSamples: state.stages.invalidSamples,
+      },
     };
   },
   // Test/debug only — wipe counters.
@@ -358,6 +570,7 @@ export const syncMetrics = {
     state.byQuery.clear();
     state.recent.length = 0;
     state.gateProbe = null;
+    resetStageStats();
   },
 };
 
@@ -376,6 +589,8 @@ export function installSyncMetricsGlobal(): void {
     snapshot: () => syncMetrics.snapshot(),
     /** Every query this page has issued (bounded ring) — the hydration wave. */
     queries: () => syncMetrics.recentQueries(),
+    /** Every accepted freshness stage (bounded ring), all durations in ms. */
+    stages: () => syncMetrics.recentStages(),
     // Convenience: pretty-print to console.
     log: () => {
       // eslint-disable-next-line no-console
