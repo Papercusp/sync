@@ -369,7 +369,8 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
     bulk: 0,
   };
   const classMetrics = makeClassMetrics();
-  const streams = new Map<string, { name?: string; countsAgainstBudget: boolean }>();
+  type StreamRecord = { name?: string; countsAgainstBudget: boolean };
+  const streams = new Map<string, StreamRecord>();
 
   const countedStreams = (): number => {
     let count = 0;
@@ -787,13 +788,18 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
     const id = input.id ?? `origin-stream-${nextStreamId++}`;
     const kind = input.kind?.toLowerCase() ?? 'standing';
     const countsAgainstBudget = input.countsAgainstBudget ?? !(kind === 'bulk' || kind === 'media');
-    streams.set(id, { name: input.name, countsAgainstBudget });
+    // A caller-provided id is a stable identity for a logical stream.  Treat a
+    // second registration as replacement, but bind each lease's release to the
+    // record it installed: an old lease must never delete a newer registration
+    // that reused the same id.
+    const record: StreamRecord = { name: input.name, countsAgainstBudget };
+    streams.set(id, record);
     pump();
     let released = false;
     const release = (): void => {
       if (released) return;
       released = true;
-      streams.delete(id);
+      if (streams.get(id) === record) streams.delete(id);
       pump();
     };
     return {
@@ -864,7 +870,20 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
       streams.clear();
     },
     tryAcquire(signal?: AbortSignal): (() => void) | null {
+      // This compatibility surface must not jump ahead of work already known
+      // to the class-aware scheduler.  `permitGate` only sees permits, not our
+      // per-class queues, so checking it alone would let an external caller
+      // consume capacity while a queued interactive/background task waits.
+      if (closed) return null;
       syncPermitLimit();
+      if (totalQueued() > 0) {
+        // Give stale entries (and any newly-admissible class) one chance to
+        // clear before declining the external reservation.  If a queued entry
+        // remains, preserving scheduler order is more important than handing
+        // out an unclassified permit.
+        pump();
+        if (totalQueued() > 0) return null;
+      }
       const releasePermit = permitGate.tryAcquire(signal);
       if (!releasePermit) return null;
       active++;
