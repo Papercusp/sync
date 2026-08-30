@@ -36,7 +36,13 @@
  */
 import { reportSyncReachable, reportSyncStaleOperator, reportSyncUnreachable } from '../../connectivity';
 import { getSyncDeltaCodec, type SyncDeltaMeta } from '../../delta-codec';
-import { syncMetrics, type SyncQueryOutcome } from '../../observability/metrics';
+import {
+  createSyncTraceId,
+  syncMetrics,
+  type SyncQueryOutcome,
+  type SyncQueryTiming,
+  type SyncServerTiming,
+} from '../../observability/metrics';
 import { createConcurrencyGate, type ConcurrencyGate } from './concurrency-gate';
 
 /** Monotonic-ish clock; `performance` is absent in some non-browser test hosts. */
@@ -48,7 +54,12 @@ const nowMs = (): number => (typeof performance !== 'undefined' ? performance.no
  * from the request, and the queue wait is the half that was invisible.
  */
 interface RequestMeta {
+  traceId: string;
   sentAtMs: number | null;
+  responseAtMs: number | null;
+  bodyCompleteAtMs: number | null;
+  parseCacheMs: number | null;
+  resolverMs: number | null;
   bytes: number;
 }
 
@@ -57,6 +68,8 @@ export interface QueryResult {
   version: string;
   changes?: unknown[];
   delta?: SyncDeltaMeta;
+  /** Internal trace metadata carried through react-query to the React writers. */
+  syncTiming?: SyncQueryTiming;
 }
 
 export interface QueryFetchOptions {
@@ -304,6 +317,7 @@ export function getQueryFetcher(
         // swallow that so it is not an unhandled rejection.
         inFlight.catch(() => {});
         res = await Promise.race([inFlight, expiry]);
+        meta.responseAtMs = nowMs();
       } catch (e) {
         // OUR deadline fired: this request is never coming back. Reject loudly
         // rather than leaving the caller to time out against a pending promise —
@@ -338,18 +352,42 @@ export function getQueryFetcher(
       // (the desktop IPC polyfill does not). Payload weight is half of what
       // P-002 had to measure; measuring it from outside the app was the hard way.
       const text = await res.text();
+      meta.bodyCompleteAtMs = nowMs();
       meta.bytes = text.length;
+      const parseStartedAtMs = meta.bodyCompleteAtMs;
       const json = (text ? JSON.parse(text) : {}) as {
         rows?: unknown[];
         changes?: unknown[];
         version?: string;
         delta?: SyncDeltaMeta;
+        timing?: Partial<SyncServerTiming>;
       };
+      const parsedAtMs = nowMs();
+      meta.parseCacheMs = Math.max(0, parsedAtMs - (parseStartedAtMs ?? parsedAtMs));
+      const serverTiming =
+        json.timing?.unit === 'ms' &&
+        Number.isFinite(json.timing.resolverMs) &&
+        Number.isFinite(json.timing.resolverStartedAtMs) &&
+        Number.isFinite(json.timing.resolverCompletedAtMs)
+          ? (json.timing as SyncServerTiming)
+          : undefined;
+      meta.resolverMs = serverTiming?.resolverMs ?? null;
+      const transferMs =
+        meta.responseAtMs === null
+          ? 0
+          : Math.max(0, (meta.bodyCompleteAtMs ?? parsedAtMs) - meta.responseAtMs);
       return {
         rows: json.rows ?? [],
         version: json.version ?? String(Date.now()),
         changes: json.changes,
         delta: json.delta,
+        syncTiming: {
+          traceId: meta.traceId,
+          resolverMs: serverTiming?.resolverMs,
+          transferMs,
+          parseCacheMs: meta.parseCacheMs,
+          parseCacheEndedAtMs: parsedAtMs,
+        },
       };
     } finally {
       // Covers the BODY read too — a hung `res.json()` holds the slot exactly as
@@ -403,7 +441,15 @@ export function getQueryFetcher(
       else signal.addEventListener('abort', onCallerAbort, { once: true });
     }
     const startedAtMs = nowMs();
-    const meta: RequestMeta = { sentAtMs: null, bytes: -1 };
+    const meta: RequestMeta = {
+      traceId: createSyncTraceId('query'),
+      sentAtMs: null,
+      responseAtMs: null,
+      bodyCompleteAtMs: null,
+      parseCacheMs: null,
+      resolverMs: null,
+      bytes: -1,
+    };
     // RACED for the same reason sendOne races: a rejection we control is the
     // only way to guarantee this settles regardless of how the gate or the
     // transport behaves.
@@ -443,7 +489,16 @@ export function getQueryFetcher(
       // The loser of the race can still reject later; swallow it so it is not
       // an unhandled rejection.
       running.catch(() => {});
-      return await Promise.race([running, expiry]);
+      const result = await Promise.race([running, expiry]);
+      const admittedAtMs = meta.sentAtMs ?? nowMs();
+      const timing = result.syncTiming;
+      result.syncTiming = {
+        ...(timing ?? {}),
+        traceId: meta.traceId,
+        schedulerWaitMs: Math.max(0, admittedAtMs - startedAtMs),
+        parseCacheEndedAtMs: timing?.parseCacheEndedAtMs ?? nowMs(),
+      };
+      return result;
     } catch (e) {
       outcome = expired ? 'timeout' : isAbortError(e, signal) ? 'aborted' : 'error';
       throw e;
@@ -456,13 +511,23 @@ export function getQueryFetcher(
       // `sentAtMs` — so the whole elapsed time is queue wait, not a lost sample.
       const endedAtMs = nowMs();
       const sentAtMs = meta.sentAtMs ?? endedAtMs;
+      const waitMs = Math.max(0, sentAtMs - startedAtMs);
       syncMetrics.queryCompleted({
         name,
         startedAtMs,
-        waitMs: sentAtMs - startedAtMs,
+        waitMs,
         requestMs: meta.sentAtMs === null ? 0 : endedAtMs - meta.sentAtMs,
         bytes: meta.bytes,
         outcome,
+        traceId: meta.traceId,
+        stages: {
+          schedulerWaitMs: waitMs,
+          ...(meta.resolverMs === null ? {} : { resolverMs: meta.resolverMs }),
+          ...(meta.responseAtMs === null || meta.bodyCompleteAtMs === null
+            ? {}
+            : { transferMs: Math.max(0, meta.bodyCompleteAtMs - meta.responseAtMs) }),
+          ...(meta.parseCacheMs === null ? {} : { parseCacheMs: meta.parseCacheMs }),
+        },
       });
     }
   };

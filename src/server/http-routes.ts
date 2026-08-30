@@ -32,6 +32,7 @@
 
 import { NAME_NOT_FOUND, type NamedQueryResolver } from './query-registry';
 import type { SyncEvent } from './invalidation-bus';
+import type { SyncServerTiming } from '../observability/metrics';
 
 function jsonResponse(obj: unknown, status: number): Response {
   return new Response(JSON.stringify(obj), {
@@ -74,13 +75,21 @@ export function createRestQueryHandler(
       return jsonResponse({ error: 'invalid args (not JSON)' }, 400);
     }
     if (req.signal.aborted) return new Response(null, { status: 499 });
+    const resolverStartedAtMs = Date.now();
     try {
       const rows = await resolve(name, args);
       if (rows === NAME_NOT_FOUND) {
         return jsonResponse({ error: `unknown queryName: ${name}`, name }, 400);
       }
       if (req.signal.aborted) return new Response(null, { status: 499 });
-      return bodyResponse(req, JSON.stringify({ rows, version: String(Date.now()) }));
+      const resolverCompletedAtMs = Date.now();
+      const timing: SyncServerTiming = {
+        unit: 'ms',
+        resolverStartedAtMs,
+        resolverCompletedAtMs,
+        resolverMs: Math.max(0, resolverCompletedAtMs - resolverStartedAtMs),
+      };
+      return bodyResponse(req, JSON.stringify({ rows, version: String(Date.now()), timing }));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse({ error: msg, name }, 500);

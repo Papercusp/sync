@@ -68,7 +68,11 @@ import {
   createUsePollingQuery,
   createPrefetchSync,
 } from '../polling/usePollingQuery';
-import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
+import {
+  createSyncTraceId,
+  syncMetrics,
+  installSyncMetricsGlobal,
+} from '../../observability/metrics';
 import { emitSyncBusEvent, type SyncBusEvent } from '../../bus-tap';
 import { reportSyncReachable, reportSyncUnreachable } from '../../connectivity';
 import type { SyncType } from '../../types';
@@ -150,6 +154,7 @@ function SSESubscriber({
     let firstConnect = true;
 
     const handlePayload = (data: string, parse: 'update' | 'invalidate') => {
+      const receivedAtMs = Date.now();
       try {
         const ev = JSON.parse(data) as (InvalidateEvent | UpdateEvent) & { tsMs?: number };
         if (!ev?.name) {
@@ -160,7 +165,12 @@ function SSESubscriber({
           syncMetrics.sseEventReceived(data?.length ?? 0);
           return;
         }
-        syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
+        const traceId = createSyncTraceId('sse');
+        syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs, {
+          queryName: ev.name,
+          traceId,
+          receivedAtMs,
+        });
         // EI-19406583179082751: name-tag the counter so `logInvalidationsBySse()` can
         // attribute a push-volume anomaly to specific query names instead of only the
         // aggregate `fromSse` total.
@@ -169,10 +179,26 @@ function SSESubscriber({
         // like attention notifiers share THIS stream instead of opening their
         // own EventSource against the same route (each standing stream costs a
         // per-host browser socket).
-        emitSyncBusEvent(ev as SyncBusEvent);
+        emitSyncBusEvent({
+          ...(ev as SyncBusEvent),
+          traceId,
+          receivedAtMs,
+          ...(ev.tsMs === undefined ? {} : { tsMs: ev.tsMs }),
+        });
         if (parse === 'update') {
           const upd = ev as UpdateEvent;
-          const cacheValue = { rows: upd.data, version: String(Date.now()) };
+          const cacheValue = {
+            rows: upd.data,
+            version: String(Date.now()),
+            syncTiming: {
+              traceId,
+              committedAtMs: ev.tsMs,
+              eventReceivedAtMs: receivedAtMs,
+              parseCacheMs: 0,
+              parseCacheEndedAtMs:
+                typeof performance !== 'undefined' ? performance.now() : receivedAtMs,
+            },
+          };
           if (upd.args) {
             queryClient.setQueryData(['sync', upd.name, upd.args], cacheValue);
           } else {

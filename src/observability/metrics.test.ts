@@ -5,7 +5,13 @@
  * Run with: npx vitest run libs/generic/sync/src/observability/metrics.test.ts
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { syncMetrics, installSyncMetricsGlobal, SYNC_QUERY_RING_SIZE } from './metrics';
+import {
+  syncMetrics,
+  installSyncMetricsGlobal,
+  SYNC_QUERY_RING_SIZE,
+  SYNC_STAGE_NAMES,
+  createSyncTraceId,
+} from './metrics';
 
 beforeEach(() => syncMetrics.__resetForTests());
 
@@ -162,6 +168,92 @@ describe('transport metrics (P-003b — the gate depth nothing outside tests rea
     expect(s.transport.inFlight).toBeNull();
     expect(s.byQuery).toEqual({});
     expect(syncMetrics.recentQueries()).toEqual([]);
+  });
+});
+
+describe('freshness stage telemetry (P-022)', () => {
+  it('publishes a closed, explicitly millisecond stage contract', () => {
+    expect(SYNC_STAGE_NAMES).toEqual([
+      'commit',
+      'eventReceipt',
+      'schedulerWait',
+      'resolver',
+      'transfer',
+      'parseCache',
+      'reactCommit',
+      'updateToScreen',
+    ]);
+    const stages = syncMetrics.snapshot().stages!;
+    expect(stages.unit).toBe('ms');
+    for (const stage of SYNC_STAGE_NAMES) {
+      expect(stages.byStage[stage]).toMatchObject({
+        unit: 'ms',
+        count: 0,
+        durationMsTotal: 0,
+        durationMsMax: 0,
+        lastDurationMs: null,
+      });
+    }
+  });
+
+  it('records stage samples and rejects non-finite/negative writer values', () => {
+    const traceId = createSyncTraceId('test');
+    syncMetrics.recordStage('resolver', 12, {
+      queryName: 'plans.list',
+      traceId,
+      measuredAtMs: 500,
+    });
+    syncMetrics.recordStage('resolver', 4, { queryName: 'plans.list', traceId, measuredAtMs: 501 });
+    syncMetrics.recordStage('transfer', -1);
+    syncMetrics.recordStage('parseCache', Number.NaN);
+    const stages = syncMetrics.snapshot().stages!;
+    expect(stages.byStage.resolver).toMatchObject({
+      unit: 'ms',
+      count: 2,
+      durationMsTotal: 16,
+      durationMsMax: 12,
+      lastDurationMs: 4,
+    });
+    expect(stages.byStage.transfer.count).toBe(0);
+    expect(stages.invalidSamples).toBe(2);
+    expect(syncMetrics.recentStages()).toEqual([
+      { stage: 'resolver', unit: 'ms', durationMs: 12, measuredAtMs: 500, queryName: 'plans.list', traceId },
+      { stage: 'resolver', unit: 'ms', durationMs: 4, measuredAtMs: 501, queryName: 'plans.list', traceId },
+    ]);
+  });
+
+  it('keeps commit and event-receipt stages on the server/client epoch timestamps', () => {
+    syncMetrics.sseEventReceived(10, 1_000, {
+      queryName: 'plans.list',
+      traceId: 'sse-test',
+      receivedAtMs: 1_125,
+    });
+    const stages = syncMetrics.snapshot().stages!;
+    expect(stages.byStage.commit).toMatchObject({ unit: 'ms', count: 1, lastDurationMs: 0 });
+    expect(stages.byStage.eventReceipt).toMatchObject({ unit: 'ms', count: 1, lastDurationMs: 125 });
+    expect(stages.recent.slice(-2)).toEqual([
+      { stage: 'commit', unit: 'ms', durationMs: 0, measuredAtMs: 1_000, queryName: 'plans.list', traceId: 'sse-test' },
+      { stage: 'eventReceipt', unit: 'ms', durationMs: 125, measuredAtMs: 1_125, queryName: 'plans.list', traceId: 'sse-test' },
+    ]);
+  });
+
+  it('queryCompleted wires the scheduler, resolver, transfer, and parse/cache writers', () => {
+    syncMetrics.queryCompleted({
+      name: 'plans.list',
+      startedAtMs: 10,
+      waitMs: 7,
+      requestMs: 20,
+      bytes: 100,
+      outcome: 'ok',
+      traceId: 'query-test',
+      stages: { schedulerWaitMs: 7, resolverMs: 5, transferMs: 8, parseCacheMs: 2 },
+    });
+    const byStage = syncMetrics.snapshot().stages!.byStage;
+    expect(byStage.schedulerWait.lastDurationMs).toBe(7);
+    expect(byStage.resolver.lastDurationMs).toBe(5);
+    expect(byStage.transfer.lastDurationMs).toBe(8);
+    expect(byStage.parseCache.lastDurationMs).toBe(2);
+    expect(syncMetrics.recentQueries()[0]).toMatchObject({ traceId: 'query-test' });
   });
 });
 

@@ -43,6 +43,23 @@ describe('createRestQueryHandler', () => {
     expect(typeof body.version).toBe('string');
   });
 
+  it('carries resolver timing with an explicit millisecond unit', async () => {
+    const res = await handler(new Request('http://t/rest-query?name=q'));
+    const body = (await res.json()) as {
+      timing?: {
+        unit: string;
+        resolverStartedAtMs: number;
+        resolverCompletedAtMs: number;
+        resolverMs: number;
+      };
+    };
+    expect(body.timing?.unit).toBe('ms');
+    expect(body.timing?.resolverCompletedAtMs).toBeGreaterThanOrEqual(body.timing?.resolverStartedAtMs ?? 0);
+    expect(body.timing?.resolverMs).toBe(
+      body.timing!.resolverCompletedAtMs - body.timing!.resolverStartedAtMs,
+    );
+  });
+
   it('500 when the resolver throws', async () => {
     const res = await handler(new Request('http://t/rest-query?name=boom'));
     expect(res.status).toBe(500);

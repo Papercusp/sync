@@ -40,7 +40,13 @@ export {
 } from './transports/polling/query-fetcher';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
-export { syncMetrics, installSyncMetricsGlobal, SYNC_QUERY_RING_SIZE } from './observability/metrics';
+export {
+  syncMetrics,
+  installSyncMetricsGlobal,
+  SYNC_QUERY_RING_SIZE,
+  SYNC_STAGE_NAMES,
+  createSyncTraceId,
+} from './observability/metrics';
 export type {
   SyncMetricsSnapshot,
   SyncQueryEvent,
@@ -48,6 +54,13 @@ export type {
   SyncQueryStat,
   SyncTransportSnapshot,
   GateProbe,
+  SyncStageName,
+  SyncStageTimings,
+  SyncStageSample,
+  SyncStageStat,
+  SyncStageSnapshot,
+  SyncServerTiming,
+  SyncQueryTiming,
 } from './observability/metrics';
 export { configureQueryHealth } from './observability/query-health';
 export type { QueryHealthConfig } from './observability/query-health';

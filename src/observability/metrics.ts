@@ -310,6 +310,37 @@ export function createSyncTraceId(prefix = 'sync'): string {
   return `${prefix}-${nextTraceId++}`;
 }
 
+function recordStageSample(
+  stage: SyncStageName,
+  durationMs: number,
+  meta: { queryName?: string; traceId?: string; measuredAtMs?: number } = {},
+): void {
+  if (!SYNC_STAGE_NAMES.includes(stage) || !Number.isFinite(durationMs) || durationMs < 0) {
+    state.stages.invalidSamples++;
+    return;
+  }
+  const measuredAtMs = meta.measuredAtMs ?? now();
+  if (!Number.isFinite(measuredAtMs)) {
+    state.stages.invalidSamples++;
+    return;
+  }
+  const stat = state.stages.byStage.get(stage) ?? freshStageStat();
+  stat.count++;
+  stat.durationMsTotal += durationMs;
+  stat.durationMsMax = Math.max(stat.durationMsMax, durationMs);
+  stat.lastDurationMs = durationMs;
+  state.stages.byStage.set(stage, stat);
+  state.stages.recent.push({
+    stage,
+    unit: 'ms',
+    durationMs,
+    measuredAtMs,
+    ...(meta.queryName ? { queryName: meta.queryName } : {}),
+    ...(meta.traceId ? { traceId: meta.traceId } : {}),
+  });
+  if (state.stages.recent.length > STAGE_RING_SIZE) state.stages.recent.shift();
+}
+
 export const syncMetrics = {
   // SSE lifecycle
   sseConnected(): void {
@@ -335,12 +366,12 @@ export const syncMetrics = {
       const receivedAtMs = meta?.receivedAtMs ?? Date.now();
       const deltaMs = receivedAtMs - serverEmittedAtMs;
       state.sse.lastEventLatencyMs = deltaMs >= 0 ? deltaMs : 0;
-      this.recordStage('commit', 0, {
+      recordStageSample('commit', 0, {
         queryName: meta?.queryName,
         traceId: meta?.traceId,
         measuredAtMs: serverEmittedAtMs,
       });
-      this.recordStage('eventReceipt', state.sse.lastEventLatencyMs, {
+      recordStageSample('eventReceipt', state.sse.lastEventLatencyMs, {
         queryName: meta?.queryName,
         traceId: meta?.traceId,
         measuredAtMs: receivedAtMs,
@@ -401,30 +432,7 @@ export const syncMetrics = {
     durationMs: number,
     meta: { queryName?: string; traceId?: string; measuredAtMs?: number } = {},
   ): void {
-    if (!SYNC_STAGE_NAMES.includes(stage) || !Number.isFinite(durationMs) || durationMs < 0) {
-      state.stages.invalidSamples++;
-      return;
-    }
-    const measuredAtMs = meta.measuredAtMs ?? now();
-    if (!Number.isFinite(measuredAtMs)) {
-      state.stages.invalidSamples++;
-      return;
-    }
-    const stat = state.stages.byStage.get(stage) ?? freshStageStat();
-    stat.count++;
-    stat.durationMsTotal += durationMs;
-    stat.durationMsMax = Math.max(stat.durationMsMax, durationMs);
-    stat.lastDurationMs = durationMs;
-    state.stages.byStage.set(stage, stat);
-    state.stages.recent.push({
-      stage,
-      unit: 'ms',
-      durationMs,
-      measuredAtMs,
-      ...(meta.queryName ? { queryName: meta.queryName } : {}),
-      ...(meta.traceId ? { traceId: meta.traceId } : {}),
-    });
-    if (state.stages.recent.length > STAGE_RING_SIZE) state.stages.recent.shift();
+    recordStageSample(stage, durationMs, meta);
   },
   /** A copy of the bounded stage ring, oldest first. */
   recentStages(): SyncStageSample[] {
@@ -464,28 +472,28 @@ export const syncMetrics = {
     const stages = ev.stages ?? {};
     // The scheduler writer is the query event itself, so retain the existing
     // waitMs field as the compatibility source of truth.
-    this.recordStage('schedulerWait', stages.schedulerWaitMs ?? ev.waitMs, {
+    recordStageSample('schedulerWait', stages.schedulerWaitMs ?? ev.waitMs, {
       queryName: ev.name,
       traceId: ev.traceId,
     });
     if (stages.resolverMs !== undefined) {
-      this.recordStage('resolver', stages.resolverMs, { queryName: ev.name, traceId: ev.traceId });
+      recordStageSample('resolver', stages.resolverMs, { queryName: ev.name, traceId: ev.traceId });
     }
     if (stages.transferMs !== undefined) {
-      this.recordStage('transfer', stages.transferMs, { queryName: ev.name, traceId: ev.traceId });
+      recordStageSample('transfer', stages.transferMs, { queryName: ev.name, traceId: ev.traceId });
     }
     if (stages.parseCacheMs !== undefined) {
-      this.recordStage('parseCache', stages.parseCacheMs, { queryName: ev.name, traceId: ev.traceId });
+      recordStageSample('parseCache', stages.parseCacheMs, { queryName: ev.name, traceId: ev.traceId });
     }
     if (stages.committedAtMs !== undefined) {
-      this.recordStage('commit', 0, {
+      recordStageSample('commit', 0, {
         queryName: ev.name,
         traceId: ev.traceId,
         measuredAtMs: stages.committedAtMs,
       });
     }
     if (stages.eventReceivedAtMs !== undefined && stages.committedAtMs !== undefined) {
-      this.recordStage(
+      recordStageSample(
         'eventReceipt',
         Math.max(0, stages.eventReceivedAtMs - stages.committedAtMs),
         { queryName: ev.name, traceId: ev.traceId, measuredAtMs: stages.eventReceivedAtMs },
@@ -571,6 +579,7 @@ export const syncMetrics = {
     state.recent.length = 0;
     state.gateProbe = null;
     resetStageStats();
+    nextTraceId = 1;
   },
 };
 

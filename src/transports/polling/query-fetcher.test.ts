@@ -28,6 +28,7 @@ import {
   _resetQueryFetchersForTests,
 } from './query-fetcher';
 import { setSyncDeltaCodec, type SyncDeltaSlot } from '../../delta-codec';
+import { syncMetrics } from '../../observability/metrics';
 
 // The fetchers Map is module-level — isolate each test with a unique endpoint.
 let epCounter = 0;
@@ -62,6 +63,7 @@ const namesOf = (mockFetch: ReturnType<typeof vi.fn>): string[] =>
 
 beforeEach(() => {
   _resetQueryFetchersForTests();
+  syncMetrics.__resetForTests();
 });
 afterEach(() => {
   setSyncDeltaCodec(null);
@@ -83,6 +85,30 @@ describe('getQueryFetcher — request shape', () => {
     // No `delta` param without a codec — byte-identical to a pre-delta request.
     expect(url.searchParams.has('delta')).toBe(false);
     expect(result).toMatchObject({ rows: [{ id: 'a' }], version: 'v1' });
+  });
+
+  it('preserves server timing and records resolver/transfer/parse stages in milliseconds', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      okResponse({
+        rows: [{ id: 'a' }],
+        version: 'v1',
+        timing: {
+          unit: 'ms',
+          resolverStartedAtMs: 100,
+          resolverCompletedAtMs: 112,
+          resolverMs: 12,
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', mockFetch);
+
+    const result = await getQueryFetcher(ep())('plans.list', {});
+    expect(result.syncTiming).toMatchObject({ traceId: expect.stringMatching(/^query-/), resolverMs: 12 });
+    expect(result.syncTiming?.transferMs).toBeGreaterThanOrEqual(0);
+    expect(result.syncTiming?.parseCacheMs).toBeGreaterThanOrEqual(0);
+    const event = syncMetrics.recentQueries().at(-1)!;
+    expect(event.stages).toMatchObject({ resolverMs: 12 });
+    expect(syncMetrics.snapshot().stages?.byStage.resolver).toMatchObject({ unit: 'ms', count: 1 });
   });
 
   it('appends the token query param when provided', async () => {

@@ -16,6 +16,7 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createUsePollingQuery } from './usePollingQuery';
+import { syncMetrics } from '../../observability/metrics';
 
 // The fetchers Map is module-level — isolate tests via unique endpoints.
 let epCounter = 0;
@@ -42,6 +43,7 @@ const argsOf = (mockFetch: ReturnType<typeof vi.fn>): unknown[] =>
 
 afterEach(() => {
   vi.restoreAllMocks();
+  syncMetrics.__resetForTests();
 });
 
 describe('usePollingQuery — queryKey stability (P-066)', () => {
@@ -98,6 +100,45 @@ describe('usePollingQuery — queryKey stability (P-066)', () => {
     // order-sensitive key would produce two).
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(argsOf(mockFetch)).toEqual([{ a: 1, b: 2 }]);
+  });
+});
+
+describe('usePollingQuery — freshness stage writers (P-022)', () => {
+  it('records distinct React-commit and update-to-screen stages for a traced result', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          rows: [1],
+          version: 'v1',
+          timing: {
+            unit: 'ms',
+            resolverStartedAtMs: 100,
+            resolverCompletedAtMs: 110,
+            resolverMs: 10,
+          },
+        }),
+    });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const usePollingQuery = createUsePollingQuery({
+      restEndpoint: ep(),
+      defaultPollIntervalMs: 60_000,
+    });
+    const { result } = renderHook(
+      () => usePollingQuery({ queryName: 'q.stages', args: {} }),
+      { wrapper: makeWrapper() },
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => {
+      const stages = syncMetrics.snapshot().stages?.byStage;
+      expect(stages?.reactCommit.count).toBeGreaterThan(0);
+      expect(stages?.updateToScreen.count).toBeGreaterThan(0);
+    });
+    const recent = syncMetrics.recentStages();
+    expect(recent.some((sample) => sample.stage === 'reactCommit' && sample.unit === 'ms')).toBe(true);
+    expect(recent.some((sample) => sample.stage === 'updateToScreen' && sample.unit === 'ms')).toBe(true);
   });
 });
 

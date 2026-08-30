@@ -1,9 +1,13 @@
 'use client';
 
 import { keepPreviousData, useQuery, type QueryClient } from '@tanstack/react-query';
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { SyncQueryOptions, SyncQueryResult } from '../../types';
-import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
+import {
+  syncMetrics,
+  installSyncMetricsGlobal,
+  type SyncQueryTiming,
+} from '../../observability/metrics';
 import { DEFAULT_MAX_IN_FLIGHT, getQueryFetcher } from './query-fetcher';
 import { getQueryClient } from './queryClient';
 
@@ -38,6 +42,14 @@ interface PollingConfig {
 // loading. Without this, every render during loading returns a new `[]`,
 // which cascades into infinite re-render loops in downstream components.
 const EMPTY_ARRAY: readonly unknown[] = Object.freeze([]);
+
+const nowMs = (): number =>
+  typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+// Avoid React's SSR warning while keeping the commit-stage writer in the
+// layout-effect phase in a browser. The passive effect is the fallback when no
+// browser document exists (tests/SSR), where there is no paint to observe.
+const useSyncLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
 export function createUsePollingQuery(config: PollingConfig) {
   // One fetcher (and one shared concurrency gate) per endpoint. Each query is
@@ -106,6 +118,48 @@ export function createUsePollingQuery(config: PollingConfig) {
       ...(staleTime !== undefined ? { staleTime } : {}),
       ...(persistFalse ? { meta: { persist: false } } : {}),
     });
+
+    // A successful result carries the trace started by the gated fetcher (or by
+    // an SSE update written directly into the cache). These two writers are kept
+    // separate deliberately: React commit is before paint, while the next
+    // animation frame is the closest honest proxy for "update reached screen".
+    // Missing trace metadata means the cache predates this instrument; it is
+    // left unknown rather than rendered as a zero-duration stage.
+    const timing = (data as { syncTiming?: SyncQueryTiming } | undefined)?.syncTiming;
+    const traceId = timing?.traceId;
+    useSyncLayoutEffect(() => {
+      if (!timing || !traceId) return;
+      syncMetrics.recordStage('reactCommit', Math.max(0, nowMs() - timing.parseCacheEndedAtMs), {
+        queryName,
+        traceId,
+      });
+    }, [queryName, traceId]);
+
+    useEffect(() => {
+      if (!timing || !traceId) return;
+      let cancelled = false;
+      const record = () => {
+        if (cancelled) return;
+        syncMetrics.recordStage(
+          'updateToScreen',
+          Math.max(0, nowMs() - timing.parseCacheEndedAtMs),
+          { queryName, traceId },
+        );
+      };
+      if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        const frame = window.requestAnimationFrame(record);
+        return () => {
+          cancelled = true;
+          if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(frame);
+        };
+      }
+      // Non-browser hosts have no paint boundary; record the passive-commit
+      // observation immediately rather than inventing a timer-based duration.
+      record();
+      return () => {
+        cancelled = true;
+      };
+    }, [queryName, traceId]);
 
     // Track cache hits: when the hook returns data on the first render without
     // having gone through queryFn (e.g. another subscriber filled the cache,
