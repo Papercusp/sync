@@ -101,8 +101,8 @@ describe('createSseHandler', () => {
     const res = await handler(new Request('http://t/sse'));
     expect(res.status).toBe(200);
     expect(replayed).toEqual([
-      { name: 'invalidate', data: { name: 'plans.items', args: { h: 'x' } }, id: 2 },
-      { name: 'update', data: { name: 'plans.get', data: [{ slug: 'a' }] }, id: 3 },
+      { name: 'invalidate', data: { name: 'plans.items', args: { h: 'x' }, tsMs: 0 }, id: 2 },
+      { name: 'update', data: { name: 'plans.get', data: [{ slug: 'a' }], tsMs: 0 }, id: 3 },
     ]);
   });
 });
