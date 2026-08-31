@@ -18,6 +18,21 @@
  * authority that may accept one. A client-side check that a server does not
  * repeat is a UX affordance, and treating it as enforcement is how single-use
  * quietly becomes multi-use.
+ *
+ * RELATIONSHIP TO THE EXISTING SERVER SUBSTRATE — read before extending.
+ * `packages/operator-core/lib/endpoint-route/hosted-workspace-connector.ts`
+ * already owns the AUTHORITATIVE half: `HostedWorkspaceConnectorGateway`
+ * mints (`issueSessionTicket`) and burns (`consumeSessionTicket`) tickets
+ * against a Postgres store, holding only their digests. This module does NOT
+ * reimplement, replace, or wrap that; `ScopedTicket.token` is intended to
+ * carry exactly the opaque value that gateway issues, and the gateway remains
+ * the only thing that may decide a ticket is good.
+ *
+ * The two exist at different layers because the browser cannot reach the
+ * server store before deciding whether a retry is safe to send. What is
+ * deliberately NOT done here is a second minting path: if you find yourself
+ * generating a token in this file, the correct change is to call the gateway,
+ * not to grow a parallel issuer.
  */
 
 export type TransferOperation = 'upload' | 'download' | 'stream';
