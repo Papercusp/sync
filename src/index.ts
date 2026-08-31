@@ -87,6 +87,17 @@ export type {
   TicketRedemption,
   TransferOperation,
 } from './transports/transfer/scoped-ticket';
+export {
+  ChunkedTransferError,
+  planChunks,
+  runChunkedTransfer,
+} from './transports/transfer/chunked-transfer';
+export type {
+  ChunkedTransferOptions,
+  ChunkedTransferProgress,
+  ChunkedTransferResult,
+  TransferChunk,
+} from './transports/transfer/chunked-transfer';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export {
