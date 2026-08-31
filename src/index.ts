@@ -60,6 +60,33 @@ export {
   // rather than duplicated as a literal at each call site.
   DEFAULT_REQUEST_TIMEOUT_MS,
 } from './transports/polling/query-fetcher';
+// P-021 transfer plane: bulk PTY/streaming and large upload/download traffic is
+// issued against a DIFFERENT origin from control traffic, so it draws from a
+// different browser connection pool and cannot consume the reserved
+// auth/mutation/control capacity. See transports/transfer/transfer-origin.ts.
+export {
+  TRANSFER_MODES,
+  TransportCapabilityError,
+  parseTransportCapability,
+} from './transports/transfer/transport-capability';
+export type { TransferMode, TransportCapability } from './transports/transfer/transport-capability';
+export {
+  TransferOriginError,
+  assertDistinctTransferOrigin,
+  resolveTransferPlane,
+} from './transports/transfer/transfer-origin';
+export type { TransferPlane } from './transports/transfer/transfer-origin';
+export {
+  ScopedTicketError,
+  createScopedTicketStore,
+  parseScopedTicket,
+} from './transports/transfer/scoped-ticket';
+export type {
+  ScopedTicket,
+  ScopedTicketStore,
+  TicketRedemption,
+  TransferOperation,
+} from './transports/transfer/scoped-ticket';
 export { useOwnedSyncEntity, selectOwnedData } from './useOwnedSyncEntity';
 export type { UseOwnedSyncEntityOptions, UseOwnedSyncEntityResult } from './useOwnedSyncEntity';
 export {
