@@ -266,6 +266,27 @@ function SSESubscriber({
       // Callers can explicitly opt out with visibilityPause={false}.
       pauseWhenHidden: visibilityPause ?? true,
       visibilityPauseMs: VISIBILITY_PAUSE_MS,
+      // WI-2141694: this stream holds a STANDING per-origin socket, and several
+      // same-origin documents (the portal's steering + chat panes, the HUD and
+      // launched-sessions iframes) each hold their own. At the browser's ~6
+      // connection cap the standing streams starve every short REST fetch on
+      // the page — including the ones a newly-framed document needs to boot,
+      // which is how an iframe hangs at readyState=interactive with an empty
+      // root. Yielding costs at most one poll interval here: the polling
+      // cadence above is a permanent floor ("SSE narrows the staleness window
+      // from poll-interval to event-latency"), so a parked stream re-baselines
+      // by construction rather than accumulating an unrecoverable gap — the
+      // precondition resilient-event-source documents for this opt-in.
+      //
+      // A yield is NOT an error path: yieldForContention closes the socket and
+      // sets status 'idle' without invoking onError, so it cannot trip the
+      // maxConsecutiveFailures escalation to POLLING above.
+      //
+      // Priority is left at the default 0 deliberately, which makes the
+      // registry's tie-break (oldest-first) do the right thing here: the
+      // always-present panes are the oldest streams, so they are the ones that
+      // step aside for a just-opened iframe, then resume when it closes.
+      yieldOnContention: true,
       handlers: {
         heartbeat: () => { /* watchdog reset is handled inside the wrapper */ },
         invalidate: (data) => handlePayload(data, 'invalidate'),
