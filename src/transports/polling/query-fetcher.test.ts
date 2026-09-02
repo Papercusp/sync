@@ -487,29 +487,54 @@ describe('getQueryFetcher — per-request deadline (WI-6559)', () => {
   // could flake. This BITES — before the total deadline the queued callers
   // eventually acquired a freed slot and rejected with the in-flight
   // "timed out after" message instead, having waited 2-3x as long.
+  //
+  // ONE clock for timers AND `nowMs()`, or the property under test is not what
+  // gets measured. The holder's slot is freed by its `sendOne` deadline — a
+  // `setTimeout` whose start is libuv's CACHED loop time — while `runGated`'s
+  // "was this waiter already past its deadline?" guard reads `performance.now()`.
+  // The cached loop time lags the real clock by however long the current loop
+  // iteration has already run, so under a loaded box the holder's timer can
+  // fire while the queued callers' own clocks still read < 25ms: the guard lets
+  // them into `sendOne`, `sentAtMs` gets set, and their expiry then reports the
+  // in-flight message instead (measured: 0 of 2 "waiting for a request slot" in
+  // gate run 93ddca4e, 2026-09-02, with the same file green in isolation).
+  // Faking `performance` alongside the timers pins both readings to one clock,
+  // so the assertion is about the gate's ordering, never about loop-iteration
+  // length.
   it('bounds the QUEUE WAIT too, so a queued caller cannot stack behind other callers deadlines', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(hangsIgnoringAbort));
-    // Limit 1 makes every caller after the first a QUEUED one.
-    const fetcher = getQueryFetcher(ep(), undefined, 1, 25);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+    try {
+      // Limit 1 makes every caller after the first a QUEUED one.
+      const fetcher = getQueryFetcher(ep(), undefined, 1, 25);
 
-    const started = Date.now();
-    const settled = await Promise.allSettled([
-      fetcher('holds.the.slot', {}),
-      fetcher('queued.behind.it', {}),
-      fetcher('queued.deeper', {}),
-    ]);
-    const elapsed = Date.now() - started;
+      const started = Date.now();
+      const pending = Promise.allSettled([
+        fetcher('holds.the.slot', {}),
+        fetcher('queued.behind.it', {}),
+        fetcher('queued.deeper', {}),
+      ]);
+      // Exactly one deadline's worth of time: every caller's total deadline was
+      // armed at t=0, so all of them — holder and queued alike — elapse here.
+      await vi.advanceTimersByTimeAsync(25);
+      const settled = await pending;
+      const elapsed = Date.now() - started;
 
-    expect(settled.every((r) => r.status === 'rejected')).toBe(true);
-    const reasons = settled.map((r) =>
-      r.status === 'rejected' ? String((r.reason as Error).message) : '',
-    );
-    // The two QUEUED callers never reach the transport, so they must report the
-    // wait — not a request timeout they never got far enough to incur.
-    const queuedOut = reasons.filter((m) => /waiting for a request slot/.test(m));
-    expect(queuedOut.length).toBeGreaterThanOrEqual(2);
-    // Secondary, deliberately loose: stacking would need ~3 full deadlines.
-    expect(elapsed).toBeLessThan(25 * 3);
+      expect(settled.every((r) => r.status === 'rejected')).toBe(true);
+      const reasons = settled.map((r) =>
+        r.status === 'rejected' ? String((r.reason as Error).message) : '',
+      );
+      // The two QUEUED callers never reach the transport, so they must report the
+      // wait — not a request timeout they never got far enough to incur.
+      const queuedOut = reasons.filter((m) => /waiting for a request slot/.test(m));
+      expect(queuedOut.length).toBeGreaterThanOrEqual(2);
+      // The holder DID get the slot, and says so — the WI-6569 half of the contract.
+      expect(reasons.filter((m) => /in flight/.test(m))).toHaveLength(1);
+      // Stacking would need ~3 full deadlines; everything settled inside one.
+      expect(elapsed).toBeLessThan(25 * 3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // WI-6569: the OTHER half of the message contract, and the one that cost two
