@@ -8,7 +8,7 @@ interface SyncContextValue {
   transport: SyncType;
   useDataImpl: UseDataImpl;
   prefetch: PrefetchSyncFn;
-  /** Zero custom-mutator dispatcher (WS only); absent ⇒ writes use the REST fallback. */
+  /** Legacy Zero mutator dispatcher for direct WS compatibility contexts; absent ⇒ REST fallback. */
   mutate?: MutateImpl | null;
 }
 
@@ -76,12 +76,12 @@ function resolveMutator(
 }
 
 /**
- * Returns a write function for a namespaced Zero custom mutator (e.g.
- * `'cart.addItem'`). On the WebSocket transport the mutator runs
- * OPTIMISTICALLY through the Zero client (instant local apply, then server
- * reconcile / rollback). On polling/SSE — where no Zero client exists — it
- * calls `restFallback` so the surface works on every transport. Pass a
- * stable `restFallback` (e.g. a `useCallback`).
+ * Returns a write function for a legacy namespaced Zero custom mutator (e.g.
+ * `'cart.addItem'`). A direct WebSocket compatibility context may run the
+ * mutator optimistically through its Zero client. The supported SyncProvider
+ * normalizes WebSocket preferences to SSE, where no Zero client exists, so it
+ * calls `restFallback` instead. Pass a stable `restFallback` (e.g. a
+ * `useCallback`).
  */
 export function useSyncMutate<A = unknown, R = unknown>(
   path: string,
@@ -89,9 +89,7 @@ export function useSyncMutate<A = unknown, R = unknown>(
 ): (args: A) => Promise<R> {
   // Tolerate being used OUTSIDE a <SyncProvider>: with no context there is no
   // Zero client, so every call takes the REST fallback. This lets call sites
-  // (e.g. add-to-cart islands) adopt useSyncMutate without being wrapped in a
-  // provider yet — behavior-identical to a direct fetch until a provider + WS
-  // are added, at which point the same call site becomes optimistic for free.
+  // adopt useSyncMutate without being wrapped in a provider yet.
   const ctx = useContext(SyncContext);
   const mutate = ctx?.mutate;
   return useCallback(

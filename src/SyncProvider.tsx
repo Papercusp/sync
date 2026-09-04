@@ -8,6 +8,18 @@ import { SyncContext } from './SyncContext';
 import type { SyncProviderProps, SyncQueryResult, SyncType } from './types';
 
 /**
+ * Normalize the public transport preference at the provider boundary.
+ *
+ * `WEBSOCKETS` remains in `SyncType` for source compatibility with older
+ * callers, but the Zero client/adapter was removed. Treating that legacy input
+ * as SSE here keeps the fallback state and the pre-mount context honest instead
+ * of exposing an impossible WebSocket transport.
+ */
+export function normalizeSyncType(syncType: SyncType): Exclude<SyncType, 'WEBSOCKETS'> {
+  return syncType === 'WEBSOCKETS' ? 'SSE' : syncType;
+}
+
+/**
  * Lightweight SyncContext provider used where we can't (yet) mount a real
  * transport adapter:
  *
@@ -34,7 +46,7 @@ function PendingSyncAdapter({
       invalidate: () => {},
       error: null,
       // No adapter is mounted yet, so no attempt has been made — let alone
-      // failed. Zero is the honest reading here, and it keeps a consumer's
+      // failed. No adapter attempt is the honest reading here, and it keeps a consumer's
       // `failureCount > 0` branch (the "failing and retrying" copy) correctly
       // silent during this pre-mount window rather than accusing a read that
       // has not run.
@@ -57,8 +69,9 @@ function PendingSyncAdapter({
  * The legacy Zero-powered WebSocket transport was removed in Z-2 (2026-06-20).
  * The live path has run on SSE + the sync-resolver REST endpoints since the
  * P-022 cutover (2026-05-25), so `@rocicorp/zero` and the WS adapter were dead
- * code. SSE is the default; any non-SSE preference (or an SSE fallback) renders
- * the polling adapter.
+ * code. SSE is the default; a legacy `WEBSOCKETS` preference is normalized to
+ * SSE, while an explicit POLLING preference (or an SSE fallback) renders the
+ * polling adapter.
  */
 export function SyncProvider({
   syncType = 'SSE',
@@ -77,8 +90,9 @@ export function SyncProvider({
   maxInFlightFetches,
   persistExcludeQueryNames,
 }: SyncProviderProps) {
+  const normalizedSyncType = normalizeSyncType(syncType);
   const { activeTransport, onTransportError } = useTransportFallback({
-    preferred: syncType,
+    preferred: normalizedSyncType,
     fallbackDelayMs,
     recoveryDelayMs,
     recoveryMaxDelayMs,
@@ -108,7 +122,7 @@ export function SyncProvider({
   };
 
   if (!mounted) {
-    return <PendingSyncAdapter transport={syncType}>{children}</PendingSyncAdapter>;
+    return <PendingSyncAdapter transport={normalizedSyncType}>{children}</PendingSyncAdapter>;
   }
 
   // SSE primary path. The SSEAdapter wraps the polling fetcher (initial load +
@@ -116,7 +130,7 @@ export function SyncProvider({
   // it gets is `ssePollIntervalMs` (the LONG drift-repair tick, default 180s),
   // NOT `pollIntervalMs` — under SSE the tick is gap insurance, not the
   // freshness source (EI-278). Falls back to POLLING via useTransportFallback.
-  if (syncType === 'SSE' && activeTransport === 'SSE') {
+  if (normalizedSyncType === 'SSE' && activeTransport === 'SSE') {
     return (
       <Suspense
         fallback={<PendingSyncAdapter transport="SSE">{children}</PendingSyncAdapter>}

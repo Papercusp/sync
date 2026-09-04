@@ -1,17 +1,25 @@
+/**
+ * Supported live transports are SSE and POLLING. `WEBSOCKETS` is retained as
+ * a legacy compatibility input and is normalized to SSE by `SyncProvider`.
+ */
 export type SyncType = 'WEBSOCKETS' | 'SSE' | 'POLLING';
 
 export interface SyncProviderProps {
+  /**
+   * Preferred transport. `WEBSOCKETS` is accepted for source compatibility,
+   * then normalized to SSE because the Zero WebSocket adapter is unsupported.
+   */
   syncType?: SyncType;
   children: React.ReactNode;
   /** User ID for the sync connection. */
   userId?: string;
-  /** Server URL for Zero (WS mode) or REST endpoint base (polling mode). */
+  /** Server URL or REST endpoint base used by the SSE/polling transports. */
   server?: string;
   /** REST endpoint base URL for polling. Default: server value or '/zero'. */
   restEndpoint?: string;
   /**
-   * Polling interval in ms for the POLLING transport (and the WS adapter's
-   * internal fallback), where the tick IS the freshness source.
+   * Polling interval in ms for the POLLING transport and its SSE fallback,
+   * where the tick IS the freshness source.
    * Default: 10_000 (10s).
    */
   pollIntervalMs?: number;
@@ -26,7 +34,7 @@ export interface SyncProviderProps {
    * Default: 180_000 (3min).
    */
   ssePollIntervalMs?: number;
-  /** Seconds of WS disconnection before fallback. Default: 10_000 (10s). */
+  /** Milliseconds of sustained SSE failure before fallback. Default: 10_000 (10s). */
   fallbackDelayMs?: number;
   /**
    * After falling back, wait this long before retrying the preferred
@@ -37,17 +45,14 @@ export interface SyncProviderProps {
   /** Cap for the doubling recovery delay. Default: 300_000 (5 min). */
   recoveryMaxDelayMs?: number;
   /**
-   * Zero schema for the WebSocket transport. Required when syncType is
-   * 'WEBSOCKETS'. Polling-only consumers can omit it.
-   *
-   * Caller imports their app-specific schema package directly (e.g.
-   * `@papercusp/zero` for shop, `@papercusp/zero-harness` for harness) so
-   * @papercusp/sync stays schema-agnostic.
+   * @deprecated The Zero WebSocket transport was removed. Retained for source
+   * compatibility with older providers; supported SSE/POLLING transports ignore
+   * this reserved field.
    */
   schema?: any;
   /**
-   * Named-query registry matching `schema`. Required for WebSockets.
-   * Used to translate queryName → ZQL.
+   * @deprecated Legacy Zero named-query registry. Retained for source
+   * compatibility and ignored by supported transports.
    */
   queries?: any;
   /**
@@ -56,7 +61,7 @@ export interface SyncProviderProps {
    * EventSource can't carry custom headers (e.g. mobile + JWT-gated
    * `/api/device/sync/sse`).
    *
-   * Only applied to the SSE transport; ignored by WS / polling.
+   * Only applied to the SSE transport; ignored by polling.
    */
   tokenQueryParam?: string;
   /**
@@ -93,9 +98,9 @@ export interface SyncProviderProps {
    */
   visibilityPause?: boolean;
   /**
-   * Zero custom-mutator registry (`createMutators()`) enabling optimistic
-   * writes on the WebSocket transport. Only used by WEBSOCKETS; polling/SSE
-   * route writes through the per-call REST fallback in `useSyncMutate`.
+   * @deprecated Legacy Zero custom-mutator registry. Retained for source
+   * compatibility and ignored by supported SSE/POLLING transports; writes use
+   * the per-call REST fallback in `useSyncMutate`.
    */
   mutators?: any;
   /**
@@ -126,13 +131,9 @@ export interface SyncQueryOptions {
   /** Whether this query is enabled. Default: true. */
   enabled?: boolean;
   /**
-   * Time-to-live for the materialized query, used by the WebSocket transport.
-   * Accepts the same values as `@rocicorp/zero`'s `TTL`: a number of ms,
-   * 'forever', 'none', or a string like `'5m'`, `'1h'`.
-   *
-   * Honored by the WebSocket transport (threaded into `useQuery(query, { ttl })`).
-   * Ignored by the polling transport (polling is stateless — the materialized
-   * view concept does not apply; cadence is controlled by `pollIntervalMs`).
+   * @deprecated Legacy Zero materialized-query TTL. Retained for source
+   * compatibility; supported SSE/POLLING transports ignore it. Use
+   * `staleTime` or `pollIntervalMs` for supported cache/freshness controls.
    */
   ttl?: string | number;
   /**
@@ -143,8 +144,8 @@ export interface SyncQueryOptions {
    * human-cadence data where a few seconds of staleness is acceptable; use 0
    * for queries that must always refetch on key change.
    *
-   * Ignored by the WebSocket transport (Zero materialized views are always
-   * fresh by construction).
+   * Ignored by legacy WEBSOCKETS compatibility contexts (their materialized
+   * views are not part of the supported transport implementation).
    */
   staleTime?: number;
   /**
@@ -183,7 +184,7 @@ export interface SyncQueryResult<T = any> {
   fetching: boolean;
   /** Current active transport. */
   transport: SyncType;
-  /** Force an immediate refetch (polling mode) or no-op (WS mode). */
+  /** Force an immediate refetch (SSE/POLLING) or no-op in legacy WS contexts. */
   invalidate: () => void;
   /** Error from the last fetch attempt, if any. */
   error: Error | null;
@@ -220,8 +221,8 @@ export type UseDataImpl = <T = any>(opts: SyncQueryOptions) => SyncQueryResult<T
 export type PrefetchSyncFn = (opts: SyncQueryOptions) => void;
 
 /**
- * Zero's `zero.mutate` dispatcher — namespaced custom mutators
- * (`mutate.cart.addItem(args)`). Present only on the WebSocket transport;
- * `null`/absent on polling/SSE (writes fall back to REST).
+ * Legacy Zero `zero.mutate` dispatcher — namespaced custom mutators
+ * (`mutate.cart.addItem(args)`). Kept for direct compatibility contexts;
+ * `null`/absent on supported polling/SSE providers (writes fall back to REST).
  */
 export type MutateImpl = Record<string, Record<string, (args: any) => Promise<unknown>>>;

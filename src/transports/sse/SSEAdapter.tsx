@@ -12,9 +12,10 @@
  * (jitter, zombie watchdog, heartbeat handling, Last-Event-ID-ready) are
  * load-bearing in production.
  *
- * Browser (test / dev) defaults to Zero WS; SSE acts as a fallback there
- * via useTransportFallback when WS fails. The webapp is not the production
- * user surface — see /CLAUDE.md "Deployment model".
+ * Browser (test / dev) uses this same SSE path. Legacy callers that pass
+ * `syncType="WEBSOCKETS"` are normalized by SyncProvider before adapter
+ * selection; the webapp is not the production user surface — see /CLAUDE.md
+ * "Deployment model".
  *
  * Earlier header for archival: an older doc-comment (2026-05-06) called this
  * adapter "preserved-but-frozen" alongside libs/sync/PASS_2_1_DECISION.md.
@@ -93,8 +94,6 @@ interface SSEAdapterProps {
    */
   pollIntervalMs?: number;
   onTransportError?: (error: Error) => void;
-  schema?: unknown;
-  queries?: unknown;
   /** ?token=<value> appended to the SSE URL. EventSource can't carry headers. */
   tokenQueryParam?: string;
   /** Override the SSE endpoint path. Default: `${restEndpoint}/sse`. */

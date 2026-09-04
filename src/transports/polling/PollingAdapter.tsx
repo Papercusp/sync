@@ -21,12 +21,6 @@ interface PollingAdapterProps {
   /** Query names excluded from the host's persisted-cache snapshot (WI-6656). */
   persistExcludeQueryNames?: readonly string[];
   onTransportError?: (error: Error) => void;
-  /** Accepted (and ignored) so SyncProvider can spread one commonProps
-   *  shape into both adapters. The polling transport doesn't need a Zero
-   *  schema or named-query registry — it forwards `queryName` + `args`
-   *  straight to the REST endpoint as-is. */
-  schema?: any;
-  queries?: any;
 }
 
 const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
