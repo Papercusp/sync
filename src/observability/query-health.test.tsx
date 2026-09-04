@@ -1,0 +1,298 @@
+/**
+ * Query-health observer tests (WI-5412 defect class): the four warning shapes
+ * fire on their signatures, once each, and never outside `enabled`.
+ */
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { renderHook } from '@testing-library/react';
+import {
+  configureQueryHealth,
+  useQueryHealthObserver,
+  __resetQueryHealthForTests,
+} from './query-health';
+import type { SyncQueryOptions, SyncQueryResult } from '../types';
+
+const warn = vi.fn();
+
+function res(over: Partial<SyncQueryResult<unknown>> = {}): SyncQueryResult<unknown> {
+  return {
+    data: [],
+    loading: false,
+    fetching: false,
+    transport: 'SSE',
+    invalidate: () => {},
+    error: null,
+    // Part of the result contract (WI-39675 D-004): a consumer distinguishes
+    // "still working" from "failing and retrying" by these, so a fixture that
+    // omitted them would let a health observer be written against a shape no
+    // real transport returns.
+    failureCount: 0,
+    failureReason: null,
+    ...over,
+  };
+}
+
+function opts(over: Partial<SyncQueryOptions> = {}): SyncQueryOptions {
+  return { queryName: 'test.query', ...over };
+}
+
+beforeEach(() => {
+  warn.mockReset();
+  __resetQueryHealthForTests();
+  configureQueryHealth({
+    enabled: true,
+    waterfallWindowMs: 3_000,
+    payloadBytesWarn: 1_000,
+    rowsWarn: 10,
+    payloadCheckMinRows: 2,
+    slowFetchMsWarn: 50,
+    // High by default so the other suites never trip these; the churn/thrash
+    // suites lower their own threshold locally.
+    argsChurnWindowMs: 2_000,
+    argsChurnCountWarn: 100,
+    refetchWindowMs: 10_000,
+    refetchCountWarn: 100,
+    warn,
+  });
+});
+
+describe('args-flip waterfall', () => {
+  it('warns when args change right after a fetch already ran', () => {
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: {} }), r: res({ fetching: true, loading: true }) } },
+    );
+    rerender({ o: opts({ args: { hive: 'papercusp' } }), r: res({ fetching: true, loading: true }) });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('thrown away');
+    expect(warn.mock.calls[0][0]).toContain('enabled');
+  });
+
+  it('does NOT warn when the query was disabled while args settled (the correct gating)', () => {
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: {}, enabled: false }), r: res({ loading: true }) } },
+    );
+    rerender({ o: opts({ args: { hive: 'papercusp' } }), r: res({ fetching: true, loading: true }) });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns only once per query for the same shape', () => {
+    // null → value transitions: each change is a genuine late-resolution (the
+    // waterfall signature) without tripping the blank-arg check.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { a: null, b: null } }), r: res({ fetching: true }) } },
+    );
+    rerender({ o: opts({ args: { a: 'x', b: null } }), r: res({ fetching: true }) });
+    rerender({ o: opts({ args: { a: 'x', b: 'y' } }), r: res({ fetching: true }) });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays silent on a value → value re-selection (WI-39558)', () => {
+    // A user picking a different row (WI-2 → WI-1) refetches, but that fetch
+    // is data they asked for — the waterfall signature is an input resolving
+    // late (blank → value), and this is not it.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { id: 'WI-2' } }), r: res({ fetching: true }) } },
+    );
+    rerender({ o: opts({ args: { id: 'WI-1' } }), r: res({ fetching: true }) });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when the query is disabled at the moment its args change (WI-39558)', () => {
+    // Fetch ran while enabled, then the caller disabled the query and its
+    // args moved on (a cleared selection): no refetch happens, so no waste.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { id: null } }), r: res({ fetching: true }) } },
+    );
+    rerender({ o: opts({ args: { id: 'WI-1' }, enabled: false }), r: res() });
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('oversized results', () => {
+  it('warns on row count over the threshold', () => {
+    renderHook(() =>
+      useQueryHealthObserver(opts(), res({ data: Array.from({ length: 11 }, (_, i) => ({ i })) })),
+    );
+    expect(warn.mock.calls.some(([m]) => String(m).includes('11 rows'))).toBe(true);
+  });
+
+  it('warns on payload bytes over the threshold', () => {
+    const fat = Array.from({ length: 3 }, (_, i) => ({ i, pad: 'x'.repeat(600) }));
+    renderHook(() => useQueryHealthObserver(opts(), res({ data: fat })));
+    expect(warn.mock.calls.some(([m]) => String(m).includes('KB parsed'))).toBe(true);
+  });
+
+  it('skips the size estimate below payloadCheckMinRows', () => {
+    renderHook(() => useQueryHealthObserver(opts(), res({ data: [{ pad: 'x'.repeat(5_000) }] })));
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('slow first load', () => {
+  it('warns when the fetch → settled span exceeds the threshold', async () => {
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts(), r: res({ fetching: true, loading: true }) } },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    rerender({ o: opts(), r: res({ fetching: false, data: [{ ok: 1 }] }) });
+    expect(warn.mock.calls.some(([m]) => String(m).includes('time the resolver'))).toBe(true);
+  });
+});
+
+describe('args-identity churn', () => {
+  it('warns when args change more than the threshold in the window', () => {
+    configureQueryHealth({ argsChurnCountWarn: 2 });
+    // fetching:false throughout ⇒ no fetch tracked ⇒ waterfall cannot fire,
+    // isolating the churn signal. Three arg changes trip the count>2 threshold.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { a: 1 } }), r: res() } },
+    );
+    rerender({ o: opts({ args: { a: 2 } }), r: res() });
+    rerender({ o: opts({ args: { a: 3 } }), r: res() });
+    rerender({ o: opts({ args: { a: 4 } }), r: res() });
+    expect(warn.mock.calls.some(([m]) => String(m).includes('unstable'))).toBe(true);
+  });
+
+  it('ignores args changes while the query is disabled (WI-39558)', () => {
+    configureQueryHealth({ argsChurnCountWarn: 2 });
+    // A disabled query never refetches, so its args moving (e.g. a cross-kind
+    // selection rippling into it) costs nothing — and must not warn.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { featureId: 'WI-1' }, enabled: false }), r: res() } },
+    );
+    rerender({ o: opts({ args: { featureId: 'WI-2' }, enabled: false }), r: res() });
+    rerender({ o: opts({ args: { featureId: 'WI-3' }, enabled: false }), r: res() });
+    rerender({ o: opts({ args: { featureId: 'WI-4' }, enabled: false }), r: res() });
+    rerender({ o: opts({ args: { featureId: 'WI-5' }, enabled: false }), r: res() });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('counts only the changes made while enabled (WI-39558)', () => {
+    configureQueryHealth({ argsChurnCountWarn: 2 });
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { id: 'a' } }), r: res() } },
+    );
+    // Two disabled changes must not contribute to the count…
+    rerender({ o: opts({ args: { id: 'b' }, enabled: false }), r: res() });
+    rerender({ o: opts({ args: { id: 'c' }, enabled: false }), r: res() });
+    // …so two enabled changes stay under the >2 threshold…
+    rerender({ o: opts({ args: { id: 'd' } }), r: res() });
+    rerender({ o: opts({ args: { id: 'e' } }), r: res() });
+    expect(warn).not.toHaveBeenCalled();
+    // …and the third enabled change is the one that crosses it.
+    rerender({ o: opts({ args: { id: 'f' } }), r: res() });
+    expect(warn.mock.calls.some(([m]) => String(m).includes('unstable'))).toBe(true);
+  });
+});
+
+describe('refetch thrash', () => {
+  it('warns when the same query fetches more than the threshold in the window', () => {
+    configureQueryHealth({ refetchCountWarn: 2 });
+    // Stable args ⇒ no waterfall/churn; toggling fetching false→true is a fetch
+    // start. Three starts trip the count>2 threshold.
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { a: 1 } }), r: res({ fetching: true }) } },
+    );
+    rerender({ o: opts({ args: { a: 1 } }), r: res({ fetching: false }) });
+    rerender({ o: opts({ args: { a: 1 } }), r: res({ fetching: true }) });
+    rerender({ o: opts({ args: { a: 1 } }), r: res({ fetching: false }) });
+    rerender({ o: opts({ args: { a: 1 } }), r: res({ fetching: true }) });
+    expect(warn.mock.calls.some(([m]) => String(m).includes('thrash'))).toBe(true);
+  });
+});
+
+describe('blank arg on an enabled query (P-027)', () => {
+  it('warns once per blank arg while the query is enabled', () => {
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: { potSlug: '' } }), r: res() } },
+    );
+    rerender({ o: opts({ args: { potSlug: '' } }), r: res() });
+    rerender({ o: opts({ args: { potSlug: '' } }), r: res() });
+    const blanks = warn.mock.calls.filter(([m]) => String(m).includes('blank id/slug'));
+    expect(blanks).toHaveLength(1);
+    expect(blanks[0][0]).toContain('enabled: Boolean(potSlug)');
+  });
+
+  it('warns separately for each blank arg name', () => {
+    renderHook(() => useQueryHealthObserver(opts({ args: { id: '', harnessSlug: '' } }), res()));
+    expect(warn.mock.calls.filter(([m]) => String(m).includes('blank id/slug'))).toHaveLength(2);
+  });
+
+  it('stays silent for a correctly gated `id ?? ""` call site', () => {
+    // The whole point: `{ id: id ?? '' }` behind `enabled: Boolean(id)` is the
+    // CORRECT shape. A detector that flags it would be noise, and the noise is
+    // what gets the check switched off.
+    renderHook(() => useQueryHealthObserver(opts({ args: { id: '' }, enabled: false }), res()));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-empty args, zeroes and nulls', () => {
+    renderHook(() =>
+      useQueryHealthObserver(opts({ args: { id: 'WI-1', beforeSeq: 0, owner: null } }), res()),
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('honours the blankArgAllow exemption list', () => {
+    configureQueryHealth({ blankArgAllow: ['q'] });
+    renderHook(() => useQueryHealthObserver(opts({ args: { q: '' } }), res()));
+    expect(warn).not.toHaveBeenCalled();
+    configureQueryHealth({ blankArgAllow: [] });
+  });
+
+  it('treats a blank q as optional only when the query has a nonblank scope', () => {
+    renderHook(() =>
+      useQueryHealthObserver(
+        opts({ queryName: 'features.byHarness', args: { harnessSlug: 'papercusp', q: '' } }),
+        res(),
+      ),
+    );
+    renderHook(() =>
+      useQueryHealthObserver(
+        opts({ queryName: 'features.byWorkspace', args: { workspaceId: 'workspace-1', q: '' } }),
+        res(),
+      ),
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('still warns for blank q without scope and blank ids even when q is scoped', () => {
+    renderHook(() =>
+      useQueryHealthObserver(opts({ queryName: 'features.unscoped', args: { q: '' } }), res()),
+    );
+    renderHook(() =>
+      useQueryHealthObserver(
+        opts({ queryName: 'features.scopedWithBlankId', args: { id: '', harnessSlug: 'papercusp', q: '' } }),
+        res(),
+      ),
+    );
+    const blanks = warn.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.includes('blank id/slug'));
+    expect(blanks).toHaveLength(2);
+    expect(blanks.some((message) => message.includes('`q: ""`'))).toBe(true);
+    expect(blanks.some((message) => message.includes('`id: ""`'))).toBe(true);
+  });
+});
+
+describe('kill switch', () => {
+  it('does nothing when disabled', () => {
+    configureQueryHealth({ enabled: false });
+    const { rerender } = renderHook(
+      ({ o, r }: { o: SyncQueryOptions; r: SyncQueryResult<unknown> }) => useQueryHealthObserver(o, r),
+      { initialProps: { o: opts({ args: {} }), r: res({ fetching: true }) } },
+    );
+    rerender({ o: opts({ args: { hive: 'x' } }), r: res({ data: Array.from({ length: 50 }, () => ({})) }) });
+    expect(warn).not.toHaveBeenCalled();
+  });
+});

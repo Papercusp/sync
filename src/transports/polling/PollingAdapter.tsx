@@ -16,13 +16,11 @@ interface PollingAdapterProps {
   /** When set, every `/rest-query` URL gets `?token=<encoded>` appended.
    *  Mirrors the SSE adapter's `tokenQueryParam`. */
   tokenQueryParam?: string;
+  /** Max sync requests in flight at once (default 24). See query-fetcher.ts. */
+  maxInFlightFetches?: number;
+  /** Query names excluded from the host's persisted-cache snapshot (WI-6656). */
+  persistExcludeQueryNames?: readonly string[];
   onTransportError?: (error: Error) => void;
-  /** Accepted (and ignored) so SyncProvider can spread one commonProps
-   *  shape into both adapters. The polling transport doesn't need a Zero
-   *  schema or named-query registry — it forwards `queryName` + `args`
-   *  straight to the REST endpoint as-is. */
-  schema?: any;
-  queries?: any;
 }
 
 const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
@@ -47,19 +45,21 @@ export function PollingAdapter({
   server,
   pollIntervalMs = 10_000,
   tokenQueryParam,
+  maxInFlightFetches,
+  persistExcludeQueryNames,
 }: PollingAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   warnIfDefaultUsedInProd(endpoint);
   const queryClient = getQueryClient();
 
   const useDataImpl = useMemo(
-    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam }),
-    [endpoint, pollIntervalMs, tokenQueryParam],
+    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames }),
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames],
   );
 
   const prefetch = useMemo(
-    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam }, queryClient),
-    [endpoint, pollIntervalMs, tokenQueryParam, queryClient],
+    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches }, queryClient),
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryClient],
   );
 
   const ctxValue = useMemo(

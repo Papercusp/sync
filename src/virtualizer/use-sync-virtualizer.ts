@@ -10,7 +10,6 @@ import {
   useReducer,
   useRef,
   useState,
-  type Key,
 } from 'react';
 import { assert } from './asserts';
 import { pagingReducer, type PagingState } from './paging-reducer';
@@ -51,6 +50,14 @@ const TOP_ANCHOR = Object.freeze({
   startRow: undefined,
 }) satisfies Anchor<unknown>;
 
+// A row key is always a plain string/number/bigint — matching what
+// @tanstack/virtual-core's own `getItemKey` accepts. Deliberately NOT React's
+// `Key` type: React 19.2 widened it to include `typeof React.optimisticKey`
+// (a reconciler-internal branded symbol never returned by real key
+// extractors), which then fails to satisfy TanStack's narrower Key when
+// passed through to `getItemKey` below.
+type RowKey = number | string | bigint;
+
 export type TanstackUseVirtualizerOptions<
   TScrollElement extends Element,
   TItemElement extends Element,
@@ -73,7 +80,7 @@ export type UseSyncVirtualizerOptions<
   /** ms the list must stay idle before queries receive `settled: true`. Default 2000. */
   settleTime?: number | undefined;
   toStartRow: (row: TRow) => TStartRow;
-  getRowKey?: ((row: TRow) => Key) | undefined;
+  getRowKey?: ((row: TRow) => RowKey) | undefined;
   scrollState?: ScrollHistoryState<TStartRow, TListContextParams> | null | undefined;
   onScrollStateChange?: (
     state: ScrollHistoryState<TStartRow, TListContextParams>,

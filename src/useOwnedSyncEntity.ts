@@ -7,21 +7,24 @@ import type { SyncType } from './types';
 /**
  * useOwnedSyncEntity — a client-owned mutable store keyed by a client-readable
  * id cookie, with a getOrCreate bootstrap. The write-side companion to the
- * read-cache `useVersionedResource`: it makes optimistic Zero writes *reflect*
+ * read-cache `useVersionedResource`: it makes legacy optimistic writes *reflect*
  * (the writes themselves stay at the call site via `useSyncMutate`).
  *
  * It centralizes three load-bearing correctness invariants that were otherwise
  * hand-copied across every owned-store surface (and were the bugs the cart /
  * quote-cart work actually hit):
  *
- *   (a) Keep the bootstrap seed until the Zero query loads — never flash empty.
- *   (b) On WebSockets, NEVER REST-refresh — a focus/route re-pull clobbers
- *       optimistic Zero state. (Zero keeps the entity fresh.)
+ *   (a) Keep the bootstrap seed until the sync query loads — never flash empty.
+ *   (b) In a legacy direct WebSocket compatibility context, NEVER REST-refresh
+ *       — a focus/route re-pull clobbers optimistic Zero state. (Zero keeps the
+ *       entity fresh.) SyncProvider normalizes WEBSOCKETS to SSE, so supported
+ *       provider instances use the polling/SSE branch below.
  *   (c) Bootstrap (getOrCreate) sets the id cookie, THEN we re-read it into
  *       reactive state so the `useSyncQuery` subscription attaches.
  *
- * On polling/SSE there's no Zero client: the bootstrap + `read` REST path drives
- * the entity, behaviour-identical to a plain getCart-style hook.
+ * On supported polling/SSE transports there's no Zero client: the bootstrap +
+ * `read` REST path drives the entity, behaviour-identical to a plain
+ * getCart-style hook.
  */
 
 export interface UseOwnedSyncEntityOptions<TRow, TShape> {
@@ -38,13 +41,13 @@ export interface UseOwnedSyncEntityOptions<TRow, TShape> {
   /** Side-effect-free re-pull, wired to focus/route changes on polling. Defaults
    *  to `bootstrap` (fine when getOrCreate is idempotent, as getCart is today). */
   read?: () => Promise<TShape>;
-  /** Map a present Zero row → the domain shape. Pure (no call-site override
+  /** Map a present sync row → the domain shape. Pure (no call-site override
    *  state — surfaces that need that, e.g. CartShell's qty-0 mask, layer it over
    *  `data` themselves). */
   map: (row: TRow) => TShape;
   /** Shape when there's no id / no row yet. Default `null`. */
   empty?: TShape | null;
-  /** When false, the store is inert: no bootstrap, no Zero subscription, no
+  /** When false, the store is inert: no bootstrap, no sync subscription, no
    *  refresh — for conditionally-mounted surfaces (e.g. the quote-cart island is
    *  suppressed on /wholesale). May flip true later (re-mounts the bootstrap).
    *  Default true. */
@@ -58,17 +61,17 @@ export interface UseOwnedSyncEntityResult<TShape> {
   loading: boolean;
   error: Error | null;
   transport: SyncType;
-  /** Polling/SSE: re-pull via `read`. No-op on WS (Zero keeps it fresh) — invariant (b). */
+  /** Polling/SSE: re-pull via `read`. No-op in legacy WS contexts — invariant (b). */
   refresh: (opts?: { silent?: boolean }) => Promise<void>;
   /** Explicit user-triggered re-run of `bootstrap` (getOrCreate) on BOTH
    *  transports — for an error-retry affordance. Unlike `refresh`, it is NOT a
-   *  no-op on WS: an explicit retry after a failed load has no optimistic state
+   *  no-op in legacy WS contexts: an explicit retry after a failed load has no optimistic state
    *  to clobber, so invariant (b) doesn't apply. Re-reads the id cookie too. */
   reload: () => Promise<void>;
 }
 
 /**
- * Pure WS data transition — invariant (a). While the query is loading, keep the
+ * Pure legacy WS-compatibility data transition — invariant (a). While the query is loading, keep the
  * current value (the bootstrap seed); once loaded, the mapped row is the source
  * of truth (or `empty` when there's no row). Extracted so it's unit-testable
  * without React (mirrors the data-fetch package's pure-core pattern).
@@ -131,7 +134,7 @@ export function useOwnedSyncEntity<TRow = unknown, TShape = unknown>(
     }
   }, []);
 
-  // Invariant (b): on WS the Zero subscription keeps the entity fresh — a REST
+  // Invariant (b): in a legacy WS context the Zero subscription keeps the entity fresh — a REST
   // re-pull would clobber optimistic state, so refresh is a no-op there.
   const refresh = useCallback(
     () => (!enabled || onWs ? Promise.resolve() : runFetch('read')),

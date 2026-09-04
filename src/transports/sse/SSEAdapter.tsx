@@ -4,7 +4,7 @@
  * SSE Transport — desktop's PRIMARY push transport.
  *
  * Status (2026-05-11): production. The shipping desktop app (Tauri) mounts
- * this adapter via `syncType="SSE"` in HarnessZeroProvider whenever
+ * this adapter via `syncType="SSE"` in HarnessSyncProvider whenever
  * runtime === 'tauri' (detected via `__TAURI_INTERNALS__` +
  * `/api/desktop/version` fingerprint). The server endpoint
  * `apps/operator/app/api/zero-harness/sse/route.ts` emits invalidate /
@@ -12,9 +12,10 @@
  * (jitter, zombie watchdog, heartbeat handling, Last-Event-ID-ready) are
  * load-bearing in production.
  *
- * Browser (test / dev) defaults to Zero WS; SSE acts as a fallback there
- * via useTransportFallback when WS fails. The webapp is not the production
- * user surface — see /CLAUDE.md "Deployment model".
+ * Browser (test / dev) uses this same SSE path. Legacy callers that pass
+ * `syncType="WEBSOCKETS"` are normalized by SyncProvider before adapter
+ * selection; the webapp is not the production user surface — see /CLAUDE.md
+ * "Deployment model".
  *
  * Earlier header for archival: an older doc-comment (2026-05-06) called this
  * adapter "preserved-but-frozen" alongside libs/sync/PASS_2_1_DECISION.md.
@@ -61,14 +62,21 @@
  */
 import { useEffect, useMemo, type ReactNode } from 'react';
 import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
-import { createResilientEventSource } from '@papercusp/sse';
+import { createCrossTabControlStream } from '@papercusp/sse';
 import { SyncContext } from '../../SyncContext';
 import { getQueryClient } from '../polling/queryClient';
 import {
   createUsePollingQuery,
   createPrefetchSync,
 } from '../polling/usePollingQuery';
-import { syncMetrics, installSyncMetricsGlobal } from '../../observability/metrics';
+import { getOriginScheduler } from '../polling/origin-scheduler';
+import {
+  createSyncTraceId,
+  syncMetrics,
+  installSyncMetricsGlobal,
+} from '../../observability/metrics';
+import { emitSyncBusEvent, type SyncBusEvent } from '../../bus-tap';
+import { reportSyncReachable, reportSyncUnreachable } from '../../connectivity';
 import type { SyncType } from '../../types';
 
 interface SSEAdapterProps {
@@ -76,16 +84,26 @@ interface SSEAdapterProps {
   userId?: string;
   server?: string;
   restEndpoint?: string;
+  /**
+   * Drift-repair refetch interval. Under SSE, freshness comes from
+   * invalidate-driven refetches — this tick only repairs pushes lost to an
+   * SSE blip or a table missing its bridge entry, so it defaults LONG
+   * (180s). Do not hand it the POLLING transport's fast cadence (EI-278:
+   * a shared 5-10s interval made every subscription REST-refetch on that
+   * cadence on top of SSE — ~3.2 fetches/s sustained, 16GB webview OOM).
+   */
   pollIntervalMs?: number;
   onTransportError?: (error: Error) => void;
-  schema?: unknown;
-  queries?: unknown;
   /** ?token=<value> appended to the SSE URL. EventSource can't carry headers. */
   tokenQueryParam?: string;
   /** Override the SSE endpoint path. Default: `${restEndpoint}/sse`. */
   endpointOverride?: string;
   /** Pause EventSource when document hidden >5min. */
   visibilityPause?: boolean;
+  /** Max sync requests in flight at once (default 24). See query-fetcher.ts. */
+  maxInFlightFetches?: number;
+  /** Query names excluded from the host's persisted-cache snapshot (WI-6656). */
+  persistExcludeQueryNames?: readonly string[];
 }
 
 const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
@@ -127,15 +145,36 @@ function SSESubscriber({
       ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenQueryParam)}`
       : baseUrl;
 
+    // Account for the consolidated control stream in the same per-origin
+    // budget as finite requests. Only the elected physical owner holds this
+    // lease; follower tabs receive the owner's events over BroadcastChannel
+    // and therefore do not spend another origin connection. Extra streams
+    // dynamically reduce admission; bulk/media transports use a separate
+    // registration and never consume this reservation (D-017/P-018).
+    const scheduler = getOriginScheduler(endpoint);
+    let controlStream: ReturnType<typeof scheduler.registerStream> | null = null;
+    const onPhysicalStreamChange = (active: boolean): void => {
+      if (active) {
+        if (!controlStream) {
+          controlStream = scheduler.registerStream({
+            name: 'control-sse',
+            kind: 'control',
+          });
+        }
+      } else {
+        controlStream?.release();
+        controlStream = null;
+      }
+    };
+
     // Resilience (jitter, zombie watchdog, backoff, escalation, visibility
-    // pause) lives in @papercusp/sse's createResilientEventSource. This
-    // subscriber only owns the react-query invalidation/setQueryData
-    // wiring + syncMetrics calls. Behavior preserved verbatim against
-    // the pre-extraction implementation (libs/sse/src/client/resilient-event-source.ts
-    // is the literal port).
+    // pause) lives in @papercusp/sse's cross-tab control wrapper, which
+    // composes createResilientEventSource. This subscriber only owns the
+    // react-query invalidation/setQueryData wiring + syncMetrics calls.
     let firstConnect = true;
 
     const handlePayload = (data: string, parse: 'update' | 'invalidate') => {
+      const receivedAtMs = Date.now();
       try {
         const ev = JSON.parse(data) as (InvalidateEvent | UpdateEvent) & { tsMs?: number };
         if (!ev?.name) {
@@ -146,11 +185,40 @@ function SSESubscriber({
           syncMetrics.sseEventReceived(data?.length ?? 0);
           return;
         }
-        syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs);
-        syncMetrics.invalidateFromSse();
+        const traceId = createSyncTraceId('sse');
+        syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs, {
+          queryName: ev.name,
+          traceId,
+          receivedAtMs,
+        });
+        // EI-19406583179082751: name-tag the counter so `logInvalidationsBySse()` can
+        // attribute a push-volume anomaly to specific query names instead of only the
+        // aggregate `fromSse` total.
+        syncMetrics.invalidateFromSse(ev.name);
+        // Fan the raw event out to app-level listeners (bus-tap) so consumers
+        // like attention notifiers share THIS stream instead of opening their
+        // own EventSource against the same route (each standing stream costs a
+        // per-host browser socket).
+        emitSyncBusEvent({
+          ...(ev as SyncBusEvent),
+          traceId,
+          receivedAtMs,
+          ...(ev.tsMs === undefined ? {} : { tsMs: ev.tsMs }),
+        });
         if (parse === 'update') {
           const upd = ev as UpdateEvent;
-          const cacheValue = { rows: upd.data, version: String(Date.now()) };
+          const cacheValue = {
+            rows: upd.data,
+            version: String(Date.now()),
+            syncTiming: {
+              traceId,
+              committedAtMs: ev.tsMs,
+              eventReceivedAtMs: receivedAtMs,
+              parseCacheMs: 0,
+              parseCacheEndedAtMs:
+                typeof performance !== 'undefined' ? performance.now() : receivedAtMs,
+            },
+          };
           if (upd.args) {
             queryClient.setQueryData(['sync', upd.name, upd.args], cacheValue);
           } else {
@@ -181,7 +249,7 @@ function SSESubscriber({
       }
     };
 
-    const source = createResilientEventSource({
+    const source = createCrossTabControlStream({
       url: sseUrl,
       initialBackoffMs: 1_000,
       maxBackoffMs: 30_000,
@@ -192,8 +260,32 @@ function SSESubscriber({
       // After 3 consecutive failures with zero successful opens, escalate
       // via onError so useTransportFallback can move to POLLING.
       maxConsecutiveFailures: 3,
-      visibilityPause,
+      // A control stream should not remain parked in a hidden tab by default:
+      // the wrapper relinquishes the lease and lets a visible peer take over.
+      // Callers can explicitly opt out with visibilityPause={false}.
+      pauseWhenHidden: visibilityPause ?? true,
       visibilityPauseMs: VISIBILITY_PAUSE_MS,
+      // WI-2141694: this stream holds a STANDING per-origin socket, and several
+      // same-origin documents (the portal's steering + chat panes, the HUD and
+      // launched-sessions iframes) each hold their own. At the browser's ~6
+      // connection cap the standing streams starve every short REST fetch on
+      // the page — including the ones a newly-framed document needs to boot,
+      // which is how an iframe hangs at readyState=interactive with an empty
+      // root. Yielding costs at most one poll interval here: the polling
+      // cadence above is a permanent floor ("SSE narrows the staleness window
+      // from poll-interval to event-latency"), so a parked stream re-baselines
+      // by construction rather than accumulating an unrecoverable gap — the
+      // precondition resilient-event-source documents for this opt-in.
+      //
+      // A yield is NOT an error path: yieldForContention closes the socket and
+      // sets status 'idle' without invoking onError, so it cannot trip the
+      // maxConsecutiveFailures escalation to POLLING above.
+      //
+      // Priority is left at the default 0 deliberately, which makes the
+      // registry's tie-break (oldest-first) do the right thing here: the
+      // always-present panes are the oldest streams, so they are the ones that
+      // step aside for a just-opened iframe, then resume when it closes.
+      yieldOnContention: true,
       handlers: {
         heartbeat: () => { /* watchdog reset is handled inside the wrapper */ },
         invalidate: (data) => handlePayload(data, 'invalidate'),
@@ -201,10 +293,16 @@ function SSESubscriber({
       },
       onOpen: () => {
         syncMetrics.sseConnected();
+        // The stream opened — the origin is reachable (EI-239 offline store).
+        reportSyncReachable();
       },
       onStatusChange: (s) => {
         if (s === 'connecting' && !firstConnect) syncMetrics.sseReconnectAttempt();
         if (s === 'failing' || s === 'closed') syncMetrics.sseDisconnected();
+        // Reconnects failing = network-level unreachability candidate. A
+        // single blip that reopens resets via onOpen before the offline
+        // threshold (2 consecutive) is met.
+        if (s === 'failing') reportSyncUnreachable();
         // 'idle' after firstConnect=false means we transitioned from a live
         // connection (visibility-pause); the metric needs to fire so dashboards
         // see the drop. Initial 'idle' (before any connect) is skipped.
@@ -212,26 +310,40 @@ function SSESubscriber({
         if (s !== 'idle' && s !== 'closed') firstConnect = false;
       },
       onError,
+      onPhysicalStreamChange,
     });
 
     return () => {
       syncMetrics.sseDisconnected();
       source.close();
+      controlStream?.release();
+      controlStream = null;
     };
   }, [endpoint, queryClient, onError, tokenQueryParam, endpointOverride, visibilityPause]);
 
   return null;
 }
 
+/**
+ * Default SSE drift-repair interval (EI-278). LONG by design: under SSE the
+ * refetch trigger is the invalidation push; this tick only catches pushes
+ * lost to a blip or an unbridged table. Anything in the 5-15s range here
+ * turns the "push-driven" transport into a fleet-wide poll storm
+ * (~3.2 req/s measured on the operator /adv page) — see the pin test.
+ */
+export const SSE_DRIFT_REPAIR_DEFAULT_MS = 180_000;
+
 export function SSEAdapter({
   children,
   restEndpoint,
   server,
-  pollIntervalMs = 10_000,
+  pollIntervalMs = SSE_DRIFT_REPAIR_DEFAULT_MS,
   onTransportError,
   tokenQueryParam,
   endpointOverride,
   visibilityPause,
+  maxInFlightFetches,
+  persistExcludeQueryNames,
 }: SSEAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   const queryClient = getQueryClient();
@@ -242,17 +354,19 @@ export function SSEAdapter({
         restEndpoint: endpoint,
         defaultPollIntervalMs: pollIntervalMs,
         tokenQueryParam,
+        maxInFlightFetches,
+        persistExcludeQueryNames,
       }),
-    [endpoint, pollIntervalMs, tokenQueryParam],
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames],
   );
 
   const prefetch = useMemo(
     () =>
       createPrefetchSync(
-        { restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam },
+        { restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches },
         queryClient,
       ),
-    [endpoint, pollIntervalMs, tokenQueryParam, queryClient],
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryClient],
   );
 
   const ctxValue = useMemo(

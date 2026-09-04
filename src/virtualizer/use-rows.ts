@@ -28,16 +28,16 @@ export type Anchor<TStartRow> =
 
 /**
  * Transport-neutral query descriptor. What zero-virtual calls a "QueryResult"
- * but framed against our useSyncQuery abstraction — the `queryName` gets
- * resolved to a Zero ZQL expression in WS mode and to a GET /zero/rest-query
- * URL in polling mode.
+ * but framed against our useSyncQuery abstraction — the `queryName` + `args`
+ * are resolved by the supported SSE/polling REST path. The legacy WS-shaped
+ * descriptor remains source-compatible for older direct contexts.
  */
 export type SyncQueryRequest = {
   /** Dot-separated name from the query registry, e.g. 'products.filtered' */
   queryName: string;
   /** Arguments passed to the parameterized query */
   args: Record<string, unknown>;
-  /** Optional TTL for IndexedDB/local-cache retention (WS-transport only) */
+  /** @deprecated Legacy Zero TTL; retained for compatibility and ignored by supported transports. */
   ttl?: string | number;
   /** Optional polling cadence override (polling-transport only) */
   pollIntervalMs?: number;
@@ -227,15 +227,14 @@ export function useRows<TRow extends { id: string }, TStartRow>({
   //
   // Subscribes to the page RIGHT AFTER the current one, using the last row of
   // the current page as the cursor. The rows are not consumed by rowAt — the
-  // subscription just pre-warms Zero's client-side replica so that when the
-  // user scrolls past and the anchor shifts, those rows are already in local
-  // IndexedDB and delivery is effectively instant.
+  // subscription just pre-warms the supported adapter's query cache so that
+  // when the user scrolls past and the anchor shifts, those rows are already
+  // available and delivery is effectively instant.
   //
-  // Without this hook, a fast scroll in WS mode hits skeletons during the
-  // ~200–500 ms window between anchor shift and Zero's fresh materialization.
-  // With it, Zero's client already has the rows, and the new hook-2 query
-  // satisfies from local cache while the server-side CVR reconciles in the
-  // background.
+  // Without this hook, a fast scroll can hit skeletons during the fetch window
+  // between anchor shift and the supported adapter's query-cache fill. With
+  // it, the new hook-2 query can satisfy from local cache while the fetcher
+  // reconciles in the background.
   //
   // Rationale for only firing in forward/backward modes: permalink already
   // has its own dual-window (hooks 2 + 3) centered on the pivot.
