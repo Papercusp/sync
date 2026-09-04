@@ -3,7 +3,7 @@
   "type": "module",
   "version": "0.0.1",
   "private": true,
-  "description": "Schema-agnostic Zero + SSE sync transports with reconnect/backpressure handling.",
+  "description": "Schema-agnostic SSE sync with polling fallback, reconnect, and backpressure handling.",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "exports": {
