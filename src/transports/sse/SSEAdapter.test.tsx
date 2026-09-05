@@ -15,6 +15,9 @@ import { QueryClient } from '@tanstack/react-query';
 import { cleanup, render } from '@testing-library/react';
 import { SSE_DRIFT_REPAIR_DEFAULT_MS, SSEAdapter } from './SSEAdapter';
 import { getQueryClient } from '../polling/queryClient';
+// Real (the mock spreads ...actual) — the channel-key assertions are about
+// this function's genuine behaviour.
+import { defaultControlChannelKey } from '@papercusp/sse';
 
 /**
  * Capture the options the adapter hands the cross-tab control stream. Only
