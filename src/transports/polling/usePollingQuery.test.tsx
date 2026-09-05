@@ -31,7 +31,7 @@ function makeWrapper() {
 function makeOkFetch(result: { rows?: unknown[]; version?: string }) {
   return vi.fn().mockResolvedValue({
     ok: true,
-    json: async () => result,
+    text: async () => JSON.stringify(result),
   });
 }
 
