@@ -630,3 +630,145 @@ describe('invalidation-bus', () => {
     expect(sent).toHaveLength(1); // the in-flight publish completed, not discarded
   });
 });
+
+/**
+ * Per-subscriber interest filter (P-005 of
+ * sse-per-client-invalidation-filtering-2026-09-04).
+ *
+ * The whole point of the seam is that it may only ever drop an event on
+ * POSITIVE knowledge — its failure mode is silent staleness, which no suite
+ * reliably catches and which users report as "the UI is wrong sometimes"
+ * rather than as a bug. So the fail-open cases below are the load-bearing
+ * tests, not the happy path.
+ */
+describe('invalidation-bus — per-subscriber filter', () => {
+  /** Subscribe, publish `names` in order, return what this subscriber saw. */
+  async function collect(
+    filter: ((e: SyncEvent) => boolean) | undefined,
+    names: string[],
+  ): Promise<string[]> {
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({ listen: lb.listen, notify: lb.notify, now: () => 1000 });
+    const seen: string[] = [];
+    await bus.subscribe((e) => seen.push(e.name), filter ? { filter } : undefined);
+    for (const n of names) await bus.notifyInvalidate(n);
+    return seen;
+  }
+
+  it('no filter delivers every event — byte-for-byte parity with the pre-filter bus', async () => {
+    expect(await collect(undefined, ['a', 'b', 'c'])).toEqual(['a', 'b', 'c']);
+  });
+
+  it('an explicit `false` is the ONLY thing that drops an event', async () => {
+    expect(await collect((e) => e.name === 'b', ['a', 'b', 'c'])).toEqual(['b']);
+  });
+
+  it('a filter is per-subscriber: one narrow subscriber cannot narrow another', async () => {
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({ listen: lb.listen, notify: lb.notify, now: () => 1000 });
+    const narrow: string[] = [];
+    const wide: string[] = [];
+    await bus.subscribe((e) => narrow.push(e.name), { filter: (e) => e.name === 'b' });
+    await bus.subscribe((e) => wide.push(e.name));
+
+    for (const n of ['a', 'b', 'c']) await bus.notifyInvalidate(n);
+
+    expect(narrow).toEqual(['b']);
+    expect(wide).toEqual(['a', 'b', 'c']);
+  });
+
+  // ---- fail-open cases (D-002) -------------------------------------------
+
+  it('a THROWING filter delivers the event rather than starving its subscriber', async () => {
+    const seen = await collect(() => {
+      throw new Error('predicate blew up');
+    }, ['a', 'b']);
+    expect(seen).toEqual(['a', 'b']);
+  });
+
+  it('a throwing filter does not break fan-out for the OTHER subscribers', async () => {
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({ listen: lb.listen, notify: lb.notify, now: () => 1000 });
+    const before: string[] = [];
+    const thrower: string[] = [];
+    const after: string[] = [];
+
+    // Registered on BOTH sides of the bad subscriber: a `throw` that escaped
+    // the per-subscriber guard would abort the `for` loop and silently starve
+    // only the subscribers iterated after it.
+    await bus.subscribe((e) => before.push(e.name));
+    await bus.subscribe((e) => thrower.push(e.name), {
+      filter: () => {
+        throw new Error('predicate blew up');
+      },
+    });
+    await bus.subscribe((e) => after.push(e.name));
+
+    await bus.notifyInvalidate('a');
+
+    expect(before).toEqual(['a']);
+    expect(thrower).toEqual(['a']); // failed open, per D-002
+    expect(after).toEqual(['a']); // the fan-out was never aborted
+  });
+
+  it('a predicate that forgets to return delivers the event (the common JS bug fails open)', async () => {
+    // The single most common way a JS predicate goes wrong is falling off the
+    // end of a branch and implicitly returning `undefined`. Under a plain
+    // `if (!wanted)` that would silently starve the client; `!== false` makes
+    // it degrade to today's full fan-out instead.
+    const forgetful = ((e: SyncEvent) => {
+      if (e.name === 'never') return true;
+      // no return -> undefined
+    }) as (e: SyncEvent) => boolean;
+
+    expect(await collect(forgetful, ['a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  it('other falsy returns are not treated as a drop either', async () => {
+    const falsy = ((e: SyncEvent) => (e.name === 'a' ? 0 : null)) as unknown as (
+      e: SyncEvent,
+    ) => boolean;
+    expect(await collect(falsy, ['a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  /**
+   * Falsifiability control (CLAUDE.md § "Proving a guard is falsifiable", the
+   * imported-module tier: a deliberately-wrong implementation kept permanently
+   * beside a calibration case, rather than a mutation of the shared tree).
+   *
+   * The two fail-open tests above assert that the bus delivers on `undefined`
+   * and other falsy returns. That assertion is only meaningful if a PLAUSIBLE
+   * alternative implementation would have failed it — otherwise it is a test
+   * that cannot fail, dressed as a guarantee. `Boolean(result)` is precisely
+   * the alternative a future reader would reach for while "simplifying"
+   * `!== false`, so pin the difference explicitly.
+   */
+  it('the fail-open rule is not vacuous — the obvious simplification would drop these', () => {
+    const naive = (result: unknown): boolean => Boolean(result); // the WRONG rule
+    const actual = (result: unknown): boolean => result !== false; // the rule in fanout()
+
+    // Calibration: on the unambiguous verdicts the two agree, so a difference
+    // below is really about ambiguity handling and not about a broken control.
+    expect([naive(true), actual(true)]).toEqual([true, true]);
+    expect([naive(false), actual(false)]).toEqual([false, false]);
+
+    // The ambiguous returns: the naive rule silently starves, the real one sends.
+    for (const ambiguous of [undefined, null, 0, '', Number.NaN]) {
+      expect(naive(ambiguous)).toBe(false);
+      expect(actual(ambiguous)).toBe(true);
+    }
+  });
+
+  it('close() removes a filtered subscriber like any other', async () => {
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({ listen: lb.listen, notify: lb.notify, now: () => 1000 });
+    const seen: string[] = [];
+    const handle = await bus.subscribe((e) => seen.push(e.name), { filter: () => true });
+
+    await bus.notifyInvalidate('a');
+    handle.close();
+    await bus.notifyInvalidate('b');
+
+    expect(seen).toEqual(['a']);
+  });
+});

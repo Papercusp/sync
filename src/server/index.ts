@@ -33,6 +33,7 @@ export {
   type ListenSource,
   type NotifySink,
   type SubscribeHandle,
+  type SubscribeOptions,
   type CreateInvalidationBusOptions,
   type InvalidationBus,
   type BridgeTarget,
