@@ -12,6 +12,9 @@ import { describe, expect, it } from 'vitest';
 import {
   INTEREST_PARAM,
   MAX_DECLARED_QUERY_NAMES,
+  classifyInterestNames,
+  normalizeInterestNames,
+  parseInterestDeclaration,
   parseInterestParam,
   withInterestParam,
 } from './interest-protocol';
@@ -97,5 +100,63 @@ describe('fail-open (D-002): every ambiguous input means NO filtering', () => {
     const atCap = Array.from({ length: MAX_DECLARED_QUERY_NAMES }, (_, i) => `q${i}`);
     const url = withInterestParam('http://x/sse', atCap);
     expect(readBack(url)).toEqual(new Set(atCap));
+  });
+});
+
+describe('disposition — WHY a declaration resolved the way it did', () => {
+  /**
+   * `parseInterestParam` collapses every fail-open case to one `undefined`,
+   * which is the right shape for the hot path and the wrong shape for anyone
+   * asking whether the feature is working. `over-cap` is a client that WANTED
+   * filtering and silently got full fan-out; once it is `undefined` it is
+   * indistinguishable from `absent`, and the reversion becomes unreportable.
+   */
+  it('names each fail-open case distinctly', () => {
+    expect(parseInterestDeclaration(null).disposition).toBe('absent');
+    expect(parseInterestDeclaration(undefined).disposition).toBe('absent');
+    expect(parseInterestDeclaration('').disposition).toBe('empty');
+    expect(parseInterestDeclaration(' , , ').disposition).toBe('empty');
+    expect(parseInterestDeclaration('a,b').disposition).toBe('declared');
+
+    const tooMany = Array.from({ length: MAX_DECLARED_QUERY_NAMES + 1 }, (_, i) => `q${i}`);
+    const over = parseInterestDeclaration(tooMany.join(','));
+    expect(over.disposition).toBe('over-cap');
+    expect(over.declaredCount).toBe(MAX_DECLARED_QUERY_NAMES + 1);
+  });
+
+  it('failsOpen is true for exactly the cases that deliver full fan-out', () => {
+    // The invariant that keeps the reason honest: a caller can branch on
+    // `failsOpen` alone and never disagree with the filter it actually got.
+    for (const raw of [null, undefined, '', ' , ']) {
+      const d = parseInterestDeclaration(raw);
+      expect(d.failsOpen).toBe(true);
+      expect(d.names).toBeUndefined();
+    }
+    const ok = parseInterestDeclaration('a');
+    expect(ok.failsOpen).toBe(false);
+    expect(ok.names).toEqual(new Set(['a']));
+  });
+
+  it('the builder and the parser share ONE cap decision', () => {
+    // Not a restatement of the cap — a proof that both sides reach the same
+    // classifier. A second cap comparison on either side is what lets "refuse"
+    // and "truncate" disagree about the very same declaration.
+    const tooMany = Array.from({ length: MAX_DECLARED_QUERY_NAMES + 1 }, (_, i) => `q${i}`);
+    expect(classifyInterestNames(tooMany).disposition).toBe('over-cap');
+    expect(withInterestParam('http://x/sse', tooMany)).toBe('http://x/sse');
+    expect(parseInterestDeclaration(tooMany.join(',')).disposition).toBe('over-cap');
+
+    // Calibration: one fewer is under the cap on BOTH sides, so the assertions
+    // above are about the cap and not about a broken input.
+    const atCap = tooMany.slice(0, MAX_DECLARED_QUERY_NAMES);
+    expect(classifyInterestNames(atCap).disposition).toBe('declared');
+    expect(withInterestParam('http://x/sse', atCap)).not.toBe('http://x/sse');
+    expect(parseInterestDeclaration(atCap.join(',')).disposition).toBe('declared');
+  });
+
+  it('normalisation is shared, so the two sides agree on what a NAME is', () => {
+    expect(normalizeInterestNames([' b ', 'a', 'a', '', '  '])).toEqual(['a', 'b']);
+    expect(classifyInterestNames([' b ', 'a', 'a']).names).toEqual(new Set(['a', 'b']));
+    expect(parseInterestDeclaration(' b , a , a ').names).toEqual(new Set(['a', 'b']));
   });
 });
