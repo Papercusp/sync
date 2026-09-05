@@ -35,6 +35,8 @@ interface PollingConfig {
    * call site.
    */
   persistExcludeQueryNames?: readonly string[];
+  /** Exact query names this endpoint admits; absent means unrestricted. */
+  queryNameAllowlist?: readonly string[];
 }
 
 // Stable singleton empty array so consumers that depend on `data` reference
@@ -73,9 +75,14 @@ export function createUsePollingQuery(config: PollingConfig) {
   const persistExcludeSet = config.persistExcludeQueryNames
     ? new Set(config.persistExcludeQueryNames)
     : null;
+  const queryNameAllowSet = config.queryNameAllowlist
+    ? new Set(config.queryNameAllowlist)
+    : null;
 
   return function usePollingQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
     const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime, persist } = opts;
+    const queryAllowed = queryNameAllowSet === null || queryNameAllowSet.has(queryName);
+    const effectiveEnabled = enabled && queryAllowed;
     const interval = pollIntervalMs ?? config.defaultPollIntervalMs;
     // WI-6656: stamp `meta.persist = false` for a query the provider (or this
     // call) opted out of the persisted-cache snapshot. A per-call `persist`
@@ -113,7 +120,7 @@ export function createUsePollingQuery(config: PollingConfig) {
       queryKey: ['sync', queryName, args],
       queryFn,
       refetchInterval: interval,
-      enabled,
+      enabled: effectiveEnabled,
       placeholderData: keepPreviousData,
       ...(staleTime !== undefined ? { staleTime } : {}),
       ...(persistFalse ? { meta: { persist: false } } : {}),
@@ -166,7 +173,7 @@ export function createUsePollingQuery(config: PollingConfig) {
     // or staleTime kept the entry fresh across a remount). Latched per mount
     // so we don't repeatedly bump the counter on re-renders.
     const recordedRef = useRef(false);
-    if (!recordedRef.current && enabled) {
+    if (!recordedRef.current && effectiveEnabled) {
       installSyncMetricsGlobal();
       if (data !== undefined && !isFetching) {
         syncMetrics.cacheHit();
@@ -178,9 +185,10 @@ export function createUsePollingQuery(config: PollingConfig) {
     }
 
     const invalidate = useCallback(() => {
+      if (!queryAllowed) return;
       syncMetrics.invalidateFromManual();
       refetch();
-    }, [refetch]);
+    }, [queryAllowed, refetch]);
 
     return {
       data: ((data as { rows?: T[] } | undefined)?.rows ?? (EMPTY_ARRAY as unknown)) as T[],
@@ -201,8 +209,12 @@ export function createPrefetchSync(config: PollingConfig, queryClient: QueryClie
     config.tokenQueryParam,
     config.maxInFlightFetches ?? DEFAULT_MAX_IN_FLIGHT,
   );
+  const queryNameAllowSet = config.queryNameAllowlist
+    ? new Set(config.queryNameAllowlist)
+    : null;
   return function prefetchSync(opts: SyncQueryOptions) {
     const { queryName, args = {} } = opts;
+    if (queryNameAllowSet !== null && !queryNameAllowSet.has(queryName)) return;
     let coalesceKey: string | undefined;
     try {
       coalesceKey = `${queryName}:${JSON.stringify(args)}`;

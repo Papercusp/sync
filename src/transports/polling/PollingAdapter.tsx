@@ -20,6 +20,8 @@ interface PollingAdapterProps {
   maxInFlightFetches?: number;
   /** Query names excluded from the host's persisted-cache snapshot (WI-6656). */
   persistExcludeQueryNames?: readonly string[];
+  /** Exact query names this endpoint admits; absent means unrestricted. */
+  queryNameAllowlist?: readonly string[];
   onTransportError?: (error: Error) => void;
 }
 
@@ -47,19 +49,20 @@ export function PollingAdapter({
   tokenQueryParam,
   maxInFlightFetches,
   persistExcludeQueryNames,
+  queryNameAllowlist,
 }: PollingAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   warnIfDefaultUsedInProd(endpoint);
   const queryClient = getQueryClient();
 
   const useDataImpl = useMemo(
-    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames }),
-    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames],
+    () => createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames, queryNameAllowlist }),
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames, queryNameAllowlist],
   );
 
   const prefetch = useMemo(
-    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches }, queryClient),
-    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryClient],
+    () => createPrefetchSync({ restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryNameAllowlist }, queryClient),
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryNameAllowlist, queryClient],
   );
 
   const ctxValue = useMemo(

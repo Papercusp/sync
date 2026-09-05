@@ -15,7 +15,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createUsePollingQuery } from './usePollingQuery';
+import { createPrefetchSync, createUsePollingQuery } from './usePollingQuery';
 import { syncMetrics } from '../../observability/metrics';
 
 // The fetchers Map is module-level — isolate tests via unique endpoints.
@@ -199,6 +199,55 @@ describe('usePollingQuery — a disabled query is not a spinner (P-027)', () => 
     expect(entry?.getObserversCount()).toBe(1);
     // ...but idle, so it is holding a cache slot, not a spinner.
     expect(entry?.state.fetchStatus).toBe('idle');
+  });
+});
+
+describe('usePollingQuery — provider query vocabulary', () => {
+  it('never dispatches a disallowed hook, manual invalidate, or prefetch', async () => {
+    const mockFetch = makeOkFetch({ rows: [], version: 'v1' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+    const endpoint = ep();
+    const config = {
+      restEndpoint: endpoint,
+      defaultPollIntervalMs: 60_000,
+      queryNameAllowlist: ['workspaceHosts.control'],
+    } as const;
+    const usePollingQuery = createUsePollingQuery(config);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+
+    const { result } = renderHook(
+      () => usePollingQuery({ queryName: 'accounts.pool' }),
+      { wrapper },
+    );
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBeNull();
+    result.current.invalidate();
+    createPrefetchSync(config, queryClient)({ queryName: 'accounts.pool' });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(syncMetrics.snapshot().transport.requests).toBe(0);
+  });
+
+  it('continues to dispatch a query named in the provider allowlist', async () => {
+    const mockFetch = makeOkFetch({ rows: [{ id: 'host-1' }], version: 'v1' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+    const usePollingQuery = createUsePollingQuery({
+      restEndpoint: ep(),
+      defaultPollIntervalMs: 60_000,
+      queryNameAllowlist: ['workspaceHosts.control'],
+    });
+
+    const { result } = renderHook(
+      () => usePollingQuery({ queryName: 'workspaceHosts.control' }),
+      { wrapper: makeWrapper() },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result.current.data).toEqual([{ id: 'host-1' }]);
   });
 });
 
