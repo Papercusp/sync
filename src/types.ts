@@ -127,6 +127,14 @@ export interface SyncProviderProps {
    * cache, only on what a persisted snapshot includes.
    */
   persistExcludeQueryNames?: readonly string[];
+  /**
+   * Exact query vocabulary this provider may dispatch. When present, hooks
+   * outside the allowlist stay disabled and imperative prefetch/invalidate
+   * calls are inert. Hosts with a deliberately narrow server endpoint use
+   * this to stop mounted shared chrome from probing routes the endpoint does
+   * not expose.
+   */
+  queryNameAllowlist?: readonly string[];
 }
 
 export interface SyncQueryOptions {
