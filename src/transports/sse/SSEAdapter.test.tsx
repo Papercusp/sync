@@ -24,7 +24,11 @@ import { getQueryClient } from '../polling/queryClient';
 const controlStreamOpts: Array<Record<string, unknown>> = [];
 /** URLs pushed via setUrl after open — the growth-driven re-declaration path. */
 const setUrlCalls: string[] = [];
-vi.mock('@papercusp/sse', () => ({
+// `...actual` keeps the REAL defaultControlChannelKey, because the channel-key
+// assertions below are about that function's actual behaviour — a stubbed one
+// would let the regression they exist to catch sail straight through.
+vi.mock('@papercusp/sse', async (importActual) => ({
+  ...(await importActual<Record<string, unknown>>()),
   createCrossTabControlStream: (opts: Record<string, unknown>) => {
     controlStreamOpts.push(opts);
     return {
@@ -189,6 +193,48 @@ describe('interest declaration on the SSE URL', () => {
     expect(controlStreamOpts.length).toBeGreaterThan(0);
     const url = String(controlStreamOpts[0]!.url);
     expect(new URL(url, 'http://localhost').searchParams.get('queries')).toBeNull();
+  });
+
+  it('keys the cross-tab channel WITHOUT the declaration, so tabs still share ONE socket', () => {
+    // The regression this catches is silent and expensive.
+    // defaultControlChannelKey folds every non-bearer query param into the
+    // channel name, and `queries` is not bearer-like — so left to the default,
+    // two tabs observing different queries would elect themselves SEPARATE
+    // owners and each open a standing socket, multiplying exactly the
+    // per-origin sockets WI-2141694 conserves. Nothing else in the suite
+    // notices: every assertion still passes, there are just more connections.
+    getQueryClient().setQueryData(['sync', 'a.query', {}], []);
+    render(<SSEAdapter>{null}</SSEAdapter>);
+    const first = controlStreamOpts.at(-1)!;
+    const firstUrl = String(first.url);
+
+    // CONTROL: the declaration really is on the wire, so nothing below passes
+    // merely because the feature failed to engage.
+    expect(firstUrl).toContain('queries=');
+
+    // The key must POSITIVELY equal the one the undeclared URL produces.
+    // Asserting only "does not contain queries" would be satisfied by the key
+    // being absent altogether — a mutation probe caught exactly that: dropping
+    // `channelKey` left it undefined, and every negative assertion passed.
+    const undeclared = firstUrl.replace(/[?&]queries=[^&]*/, '');
+    expect(typeof first.channelKey).toBe('string');
+    expect(first.channelKey).toBe(defaultControlChannelKey(undeclared));
+
+    // CALIBRATION: the default keying genuinely DIFFERS here, so the equality
+    // above is a real constraint rather than a tautology.
+    expect(defaultControlChannelKey(firstUrl)).not.toBe(first.channelKey);
+
+    cleanup();
+    getQueryClient().clear();
+    getQueryClient().setQueryData(['sync', 'b.query', {}], []);
+    render(<SSEAdapter>{null}</SSEAdapter>);
+    const second = controlStreamOpts.at(-1)!;
+
+    // CONTROL: the two mounts genuinely declared DIFFERENT sets...
+    expect(String(second.url)).not.toBe(firstUrl);
+    // ...yet land on the same channel, so they still share one owner.
+    expect(typeof second.channelKey).toBe('string');
+    expect(second.channelKey).toBe(first.channelKey);
   });
 
   it('keeps the token param alongside the declaration', () => {
