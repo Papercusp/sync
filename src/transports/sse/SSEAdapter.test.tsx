@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 import { cleanup, render } from '@testing-library/react';
 import { SSE_DRIFT_REPAIR_DEFAULT_MS, SSEAdapter } from './SSEAdapter';
+import { getQueryClient } from '../polling/queryClient';
 
 /**
  * Capture the options the adapter hands the cross-tab control stream. Only
@@ -21,10 +22,18 @@ import { SSE_DRIFT_REPAIR_DEFAULT_MS, SSEAdapter } from './SSEAdapter';
  * `.close()` is called on what it returns, so this is the whole surface.
  */
 const controlStreamOpts: Array<Record<string, unknown>> = [];
+/** URLs pushed via setUrl after open — the growth-driven re-declaration path. */
+const setUrlCalls: string[] = [];
 vi.mock('@papercusp/sse', () => ({
   createCrossTabControlStream: (opts: Record<string, unknown>) => {
     controlStreamOpts.push(opts);
-    return { close: () => {} };
+    return {
+      close: () => {},
+      setUrl: (next: string) => setUrlCalls.push(next),
+      reconnect: () => {},
+      // The adapter only reconnects from the tab holding the physical socket.
+      isOwner: true,
+    };
   },
 }));
 
@@ -124,6 +133,75 @@ describe('control stream yields under per-origin contention (WI-2141694)', () =>
     // registry's oldest-first tie-break makes them the ones that step aside
     // for a just-opened iframe. Setting a priority here would defeat that.
     expect(controlStreamOpts[0]!.streamPriority).toBeUndefined();
+  });
+});
+
+/**
+ * Per-client invalidation filtering, adapter half. The server drops any event
+ * whose query name is not in this declaration, so what the adapter puts on the
+ * URL at connect decides what this browser can ever receive. The two failure
+ * directions are NOT symmetric: declaring too much only wastes bandwidth,
+ * while declaring too little silently starves a view — so the empty-cache case
+ * must emit NO declaration rather than an empty one.
+ */
+describe('interest declaration on the SSE URL', () => {
+  const RealEventSource = (globalThis as Record<string, unknown>).EventSource;
+
+  beforeEach(() => {
+    controlStreamOpts.length = 0;
+    setUrlCalls.length = 0;
+    // Same reason as the block above: without an EventSource the adapter's
+    // effect early-returns and every assertion here would pass vacuously.
+    (globalThis as Record<string, unknown>).EventSource = class {};
+    getQueryClient().clear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    getQueryClient().clear();
+    if (RealEventSource === undefined) delete (globalThis as Record<string, unknown>).EventSource;
+    else (globalThis as Record<string, unknown>).EventSource = RealEventSource;
+  });
+
+  it('declares the query names already in the cache at connect', () => {
+    getQueryClient().setQueryData(['sync', 'work.items', {}], []);
+    getQueryClient().setQueryData(['sync', 'plans.items', {}], []);
+
+    render(<SSEAdapter>{null}</SSEAdapter>);
+
+    // CONTROL: proves the effect ran and the capture works.
+    expect(controlStreamOpts.length).toBeGreaterThan(0);
+    const url = String(controlStreamOpts[0]!.url);
+    // CALIBRATION: an option we did not add, so a bare-{} mock cannot pass.
+    expect(controlStreamOpts[0]!.zombieTimeoutMs).toBe(30_000);
+
+    const declared = new URL(url, 'http://localhost').searchParams.get('queries');
+    expect(declared).not.toBeNull();
+    expect(new Set(declared!.split(','))).toEqual(new Set(['work.items', 'plans.items']));
+  });
+
+  it('emits NO declaration when nothing is observed yet, rather than an empty one', () => {
+    // An empty declaration read as an empty allow-list would starve the client
+    // completely, and the symptom (a UI that never updates) looks like a dead
+    // connection rather than a filter bug. No param = today's full fan-out.
+    render(<SSEAdapter>{null}</SSEAdapter>);
+
+    expect(controlStreamOpts.length).toBeGreaterThan(0);
+    const url = String(controlStreamOpts[0]!.url);
+    expect(new URL(url, 'http://localhost').searchParams.get('queries')).toBeNull();
+  });
+
+  it('keeps the token param alongside the declaration', () => {
+    // Regression shape: appending the declaration with the wrong separator
+    // would swallow the token and 401 the stream.
+    getQueryClient().setQueryData(['sync', 'work.items', {}], []);
+
+    render(<SSEAdapter tokenQueryParam="tok-123">{null}</SSEAdapter>);
+
+    expect(controlStreamOpts.length).toBeGreaterThan(0);
+    const parsed = new URL(String(controlStreamOpts[0]!.url), 'http://localhost');
+    expect(parsed.searchParams.get('token')).toBe('tok-123');
+    expect(parsed.searchParams.get('queries')).toBe('work.items');
   });
 });
 

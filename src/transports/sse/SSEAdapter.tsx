@@ -62,7 +62,7 @@
  */
 import { useEffect, useMemo, type ReactNode } from 'react';
 import { QueryClientProvider, useQueryClient } from '@tanstack/react-query';
-import { createCrossTabControlStream } from '@papercusp/sse';
+import { createCrossTabControlStream, defaultControlChannelKey } from '@papercusp/sse';
 import { SyncContext } from '../../SyncContext';
 import { getQueryClient } from '../polling/queryClient';
 import {
@@ -158,14 +158,28 @@ function SSESubscriber({
     // `source` is assigned just below; growth can only be reported after the
     // debounce window, but the guard keeps that ordering explicit rather than
     // load-bearing.
+    // Pin the control-stream channel key to the URL WITHOUT the declaration.
+    //
+    // This is load-bearing, and the failure it prevents is silent and
+    // expensive: defaultControlChannelKey folds every non-bearer query param
+    // into the channel name, and `queries` is not bearer-like. Left to the
+    // default, two tabs observing different queries would compute DIFFERENT
+    // channel keys, elect themselves separate owners, and each open their own
+    // standing socket — multiplying exactly the per-origin sockets
+    // WI-2141694 exists to conserve, while making the cross-tab union below
+    // meaningless. Keying off `authedUrl` reproduces the pre-declaration key
+    // byte-for-byte, so election behaviour is unchanged by this feature.
+    const channelKey = defaultControlChannelKey(authedUrl);
+
     let source: ReturnType<typeof createCrossTabControlStream> | null = null;
     const interest = createInterestTracker({
       queryClient,
-      // Strip query/hash so tabs differing only by token or declaration share
-      // one scope — the same keying createCrossTabControlStream uses to decide
-      // which tabs share a socket. These two MUST agree: tabs that share a
-      // socket but not a scope would each declare a partial union.
-      scope: baseUrl.split(/[?#]/, 1)[0] || baseUrl,
+      // The SAME key the control stream uses, so "tabs sharing a socket" and
+      // "tabs sharing an interest union" are the same set BY CONSTRUCTION
+      // rather than by two derivations that could drift apart. It also
+      // inherits the workspace marker, so tabs on different workspaces — which
+      // deliberately do not share a socket — do not pool declarations either.
+      scope: channelKey,
       onGrow: (names) => {
         if (!source) return;
         // Every tab takes the new URL, so a follower that later wins the
@@ -288,6 +302,7 @@ function SSESubscriber({
 
     source = createCrossTabControlStream({
       url: sseUrl,
+      channelKey,
       initialBackoffMs: 1_000,
       maxBackoffMs: 30_000,
       jitter: 0.2,
