@@ -128,6 +128,8 @@ interface SSEAdapterProps {
   maxInFlightFetches?: number;
   /** Query names excluded from the host's persisted-cache snapshot (WI-6656). */
   persistExcludeQueryNames?: readonly string[];
+  /** Exact query names this endpoint admits; absent means unrestricted. */
+  queryNameAllowlist?: readonly string[];
 }
 
 const DEFAULT_REST_ENDPOINT = 'http://localhost:3100/zero';
@@ -422,6 +424,7 @@ export function SSEAdapter({
   visibilityPause,
   maxInFlightFetches,
   persistExcludeQueryNames,
+  queryNameAllowlist,
 }: SSEAdapterProps) {
   const endpoint = restEndpoint ?? (server ? `${server}/zero` : DEFAULT_REST_ENDPOINT);
   const queryClient = getQueryClient();
@@ -434,17 +437,18 @@ export function SSEAdapter({
         tokenQueryParam,
         maxInFlightFetches,
         persistExcludeQueryNames,
+        queryNameAllowlist,
       }),
-    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames],
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, persistExcludeQueryNames, queryNameAllowlist],
   );
 
   const prefetch = useMemo(
     () =>
       createPrefetchSync(
-        { restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches },
+        { restEndpoint: endpoint, defaultPollIntervalMs: pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryNameAllowlist },
         queryClient,
       ),
-    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryClient],
+    [endpoint, pollIntervalMs, tokenQueryParam, maxInFlightFetches, queryNameAllowlist, queryClient],
   );
 
   const ctxValue = useMemo(
