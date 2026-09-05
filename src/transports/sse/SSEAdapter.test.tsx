@@ -15,6 +15,7 @@ import { QueryClient } from '@tanstack/react-query';
 import { cleanup, render } from '@testing-library/react';
 import { SSE_DRIFT_REPAIR_DEFAULT_MS, SSEAdapter } from './SSEAdapter';
 import { getQueryClient } from '../polling/queryClient';
+import { INTEREST_REGROW_DEBOUNCE_MS } from './query-interest';
 // Real (the mock spreads ...actual) — the channel-key assertions are about
 // this function's genuine behaviour.
 import { defaultControlChannelKey } from '@papercusp/sse';
@@ -27,6 +28,8 @@ import { defaultControlChannelKey } from '@papercusp/sse';
 const controlStreamOpts: Array<Record<string, unknown>> = [];
 /** URLs pushed via setUrl after open — the growth-driven re-declaration path. */
 const setUrlCalls: string[] = [];
+/** Reconnects requested after open. Only the elected owner may ask for one. */
+const reconnectCalls: number[] = [];
 // `...actual` keeps the REAL defaultControlChannelKey, because the channel-key
 // assertions below are about that function's actual behaviour — a stubbed one
 // would let the regression they exist to catch sail straight through.
@@ -37,7 +40,7 @@ vi.mock('@papercusp/sse', async (importActual) => ({
     return {
       close: () => {},
       setUrl: (next: string) => setUrlCalls.push(next),
-      reconnect: () => {},
+      reconnect: () => reconnectCalls.push(Date.now()),
       // The adapter only reconnects from the tab holding the physical socket.
       isOwner: true,
     };
@@ -251,6 +254,78 @@ describe('interest declaration on the SSE URL', () => {
     const parsed = new URL(String(controlStreamOpts[0]!.url), 'http://localhost');
     expect(parsed.searchParams.get('token')).toBe('tok-123');
     expect(parsed.searchParams.get('queries')).toBe('work.items');
+  });
+});
+
+describe('union-covers-followers — the elected socket widens before a follower needs those events', () => {
+  const RealEventSource = (globalThis as Record<string, unknown>).EventSource;
+
+  beforeEach(() => {
+    controlStreamOpts.length = 0;
+    setUrlCalls.length = 0;
+    reconnectCalls.length = 0;
+    // Without an EventSource the adapter's effect early-returns and every
+    // assertion here would pass vacuously.
+    (globalThis as Record<string, unknown>).EventSource = class {};
+    getQueryClient().clear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    getQueryClient().clear();
+    if (RealEventSource === undefined) delete (globalThis as Record<string, unknown>).EventSource;
+    else (globalThis as Record<string, unknown>).EventSource = RealEventSource;
+  });
+
+  it("re-declares to cover a peer tab's name that this tab's cache can never contain", async () => {
+    // This is the failure per-client filtering can CAUSE, and it is worse than
+    // the fan-out it fixes: the owner tab holds the only socket, so a filter
+    // built from the owner's own cache starves every follower tab silently.
+    // The single-webview desktop case — where this is most likely to be tested
+    // — cannot reproduce it at all, and neither can N independent connections:
+    // they never take the follower path.
+    getQueryClient().setQueryData(['sync', 'owner.query', {}], []);
+    render(<SSEAdapter>{null}</SSEAdapter>);
+
+    const opts = controlStreamOpts.at(-1);
+    expect(opts).toBeDefined(); // CONTROL: the effect ran
+
+    const channelKey = String(opts!.channelKey);
+    expect(channelKey.length).toBeGreaterThan(0); // CONTROL: a real scope
+
+    // POSITIVE CONTROL for the *before* half of the ordering claim: at connect
+    // the declaration is owner-only, so the widening asserted below is caused
+    // by the peer announcement and not by the initial build.
+    const atConnect = new URL(String(opts!.url), 'http://localhost').searchParams.get('queries');
+    expect(new Set(atConnect!.split(','))).toEqual(new Set(['owner.query']));
+    expect(setUrlCalls).toEqual([]);
+    expect(reconnectCalls).toEqual([]);
+
+    // A follower tab announces a name the owner has never observed.
+    const peer = new BroadcastChannel(`papercusp-sync-interest:${channelKey}`);
+    peer.postMessage({
+      v: 1,
+      scope: channelKey,
+      from: 'peer-tab',
+      names: ['follower.query'],
+    });
+
+    // Real timers: BroadcastChannel delivery is a task, and the regrow is
+    // debounced. Faking either would prove the debounce, not the ordering.
+    await new Promise((resolve) => setTimeout(resolve, INTEREST_REGROW_DEBOUNCE_MS + 400));
+    peer.close();
+
+    // The declaration ON THE WIRE now covers the follower...
+    expect(setUrlCalls.length).toBeGreaterThan(0);
+    const widened = new URL(setUrlCalls.at(-1)!, 'http://localhost').searchParams.get('queries');
+    expect(new Set(widened!.split(','))).toEqual(
+      new Set(['owner.query', 'follower.query']),
+    );
+
+    // ...and the tab holding the physical socket actually reconnects onto it.
+    // Without this the new URL is only staged for a future election, and the
+    // follower stays starved on the live connection.
+    expect(reconnectCalls.length).toBeGreaterThan(0);
   });
 });
 
