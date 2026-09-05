@@ -87,6 +87,35 @@ export interface SubscribeHandle {
   close: () => void;
 }
 
+export interface SubscribeOptions {
+  /**
+   * Optional per-subscriber interest predicate. Return `false` to skip
+   * delivering this event to THIS subscriber; every other subscriber is
+   * unaffected. Omit it and the subscriber receives every event, which is
+   * exactly the pre-filter behaviour.
+   *
+   * FAILS OPEN, deliberately, and in three separate ways — the failure mode of
+   * dropping events is silent staleness, which no test suite reliably catches
+   * and which users report as "the UI is wrong sometimes" rather than as a bug:
+   *
+   *   1. no predicate supplied            -> send (unfiltered, as before);
+   *   2. the predicate THROWS             -> send, and other subscribers still
+   *                                          get the event (the same guarantee
+   *                                          `fanout` already gives a throwing
+   *                                          `send`);
+   *   3. the predicate returns anything
+   *      other than a literal `false`     -> send.
+   *
+   * (3) is the load-bearing one and is not an accident of implementation: an
+   * event is dropped only on POSITIVE knowledge that the subscriber does not
+   * want it. A predicate that falls off the end of a branch and implicitly
+   * returns `undefined` — the single most common way a JS predicate goes wrong
+   * — therefore degrades to today's full fan-out rather than to a silently
+   * starved client.
+   */
+  filter?: (e: SyncEvent) => boolean;
+}
+
 export interface CreateInvalidationBusOptions {
   listen: ListenSource;
   notify: NotifySink;
@@ -137,8 +166,13 @@ export interface CreateInvalidationBusOptions {
 }
 
 export interface InvalidationBus {
-  /** Register an SSE subscriber. Lazily starts the ListenSource. */
-  subscribe(send: (e: SyncEvent) => void): Promise<SubscribeHandle>;
+  /**
+   * Register an SSE subscriber. Lazily starts the ListenSource.
+   *
+   * `opts.filter` narrows delivery to THIS subscriber only, and fails open in
+   * every ambiguous case — see {@link SubscribeOptions}.
+   */
+  subscribe(send: (e: SyncEvent) => void, opts?: SubscribeOptions): Promise<SubscribeHandle>;
   /** Events with id > lastEventId still inside the retention window. */
   backfillSince(lastEventId: number): SyncEvent[];
   /** Publish an invalidation (or data-bearing update) to all processes. */
@@ -215,7 +249,10 @@ export function createInvalidationBus(
 
   let nextId = 1;
   const history: SyncEvent[] = [];
-  const subscribers = new Set<{ send: (e: SyncEvent) => void }>();
+  const subscribers = new Set<{
+    send: (e: SyncEvent) => void;
+    filter?: (e: SyncEvent) => boolean;
+  }>();
   const recentNotifies = new Map<string, number>();
   /**
    * Per-(source,target,args) leading/trailing state. The floor state is from
@@ -248,6 +285,19 @@ export function createInvalidationBus(
     pruneHistory();
     for (const s of subscribers) {
       try {
+        // Drop ONLY on positive knowledge: a predicate that throws, or that
+        // returns anything but a literal `false`, delivers the event. See
+        // SubscribeOptions for why every ambiguous case resolves to sending.
+        if (s.filter !== undefined) {
+          let wanted = true;
+          try {
+            wanted = s.filter(ev) !== false;
+          } catch {
+            /* a broken predicate must never starve its own subscriber */
+            wanted = true;
+          }
+          if (!wanted) continue;
+        }
         s.send(ev);
       } catch {
         /* best-effort — one bad subscriber must not break the fan-out */
@@ -423,9 +473,13 @@ export function createInvalidationBus(
     return startPromise;
   }
 
-  async function subscribe(send: (e: SyncEvent) => void): Promise<SubscribeHandle> {
+  async function subscribe(
+    send: (e: SyncEvent) => void,
+    opts?: SubscribeOptions,
+  ): Promise<SubscribeHandle> {
     await start();
-    const sub = { send };
+    const filter = opts?.filter;
+    const sub = filter !== undefined ? { send, filter } : { send };
     subscribers.add(sub);
     return { send, close: () => void subscribers.delete(sub) };
   }
