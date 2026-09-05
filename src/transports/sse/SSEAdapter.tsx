@@ -76,8 +76,30 @@ import {
   installSyncMetricsGlobal,
 } from '../../observability/metrics';
 import { emitSyncBusEvent, type SyncBusEvent } from '../../bus-tap';
-import { withInterestParam } from '../../interest-protocol';
+import { classifyInterestNames, withInterestParam } from '../../interest-protocol';
 import { createInterestTracker } from './query-interest';
+
+/**
+ * The client half of cap-crossing visibility.
+ *
+ * `withInterestParam` refuses an over-cap declaration and returns the URL
+ * unchanged, which is correct (truncating would silently starve whichever
+ * names fell off the end) but indistinguishable from never having declared —
+ * the tab reverts to full fan-out and nothing says so. Warn on the EDGE only,
+ * so a persistently over-cap client logs once rather than on every cache
+ * mutation.
+ */
+let lastInterestOverCap = false;
+function reportInterestCapCrossing(names: Iterable<string>): void {
+  const { disposition, declaredCount } = classifyInterestNames(names);
+  const overCap = disposition === 'over-cap';
+  if (overCap && !lastInterestOverCap) {
+    console.warn(
+      `[sync-sse] interest declaration OVER CAP — ${declaredCount} observed query names; this tab reverts to FULL FAN-OUT`,
+    );
+  }
+  lastInterestOverCap = overCap;
+}
 import { reportSyncReachable, reportSyncUnreachable } from '../../connectivity';
 import type { SyncType } from '../../types';
 
@@ -191,6 +213,7 @@ function SSESubscriber({
         if (source.isOwner) source.reconnect();
       },
     });
+    reportInterestCapCrossing(interest.current());
     const sseUrl = withInterestParam(authedUrl, interest.current());
 
     // Mounting a query is what grows the set; the cache is the one place that
