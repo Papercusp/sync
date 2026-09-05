@@ -182,6 +182,7 @@ function SSESubscriber({
       scope: channelKey,
       onGrow: (names) => {
         if (!source) return;
+        reportInterestCapCrossing(names);
         // Every tab takes the new URL, so a follower that later wins the
         // election opens with the current union rather than a stale set...
         source.setUrl(withInterestParam(authedUrl, names));

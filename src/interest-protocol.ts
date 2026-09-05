@@ -49,15 +49,82 @@ export const MAX_DECLARED_QUERY_NAMES = 500;
  * A client that genuinely wants nothing simply does not open the stream.
  */
 export function parseInterestParam(raw: string | null | undefined): Set<string> | undefined {
-  if (raw === null || raw === undefined) return undefined;
-  const names = new Set(
-    raw
-      .split(',')
-      .map((n) => n.trim())
-      .filter((n) => n.length > 0),
-  );
-  if (names.size === 0 || names.size > MAX_DECLARED_QUERY_NAMES) return undefined;
-  return names;
+  return parseInterestDeclaration(raw).names;
+}
+
+/**
+ * Why a declaration resolved the way it did.
+ *
+ * `parseInterestParam` deliberately collapses every fail-open case to a single
+ * `undefined`, which is the right shape for the hot path and the WRONG shape
+ * for an operator: `over-cap` is a client that WANTED filtering and silently
+ * got full fan-out instead, and it is indistinguishable from `absent` (a
+ * client that never asked) once both are `undefined`. That is the reversion
+ * nobody reports, because from the outside it looks exactly like the feature
+ * being switched off.
+ */
+export type InterestDisposition =
+  /** A usable declaration: deliver exactly these names. */
+  | 'declared'
+  /** No declaration on the wire at all — an un-upgraded or mid-handshake client. */
+  | 'absent'
+  /** A declaration that normalises to nothing. NEVER read as "send nothing". */
+  | 'empty'
+  /** More distinct names than the cap allows — refused rather than TRUNCATED. */
+  | 'over-cap'
+  /** The carrier itself could not be read (a malformed URL). */
+  | 'unreadable';
+
+/** The full result of resolving a declaration, disposition included. */
+export interface InterestDeclaration {
+  readonly disposition: InterestDisposition;
+  /** The names to filter on — present ONLY for `disposition: 'declared'`. */
+  readonly names?: Set<string>;
+  /** Distinct normalised names seen BEFORE the cap decision (0 when absent/unreadable). */
+  readonly declaredCount: number;
+  /** True whenever the resolved behaviour is full fan-out (every non-`declared` case). */
+  readonly failsOpen: boolean;
+}
+
+/** The one normalisation rule: trim, drop blanks, de-duplicate, sort. */
+export function normalizeInterestNames(names: Iterable<string>): string[] {
+  return [...new Set([...names].map((n) => n.trim()))].filter((n) => n.length > 0).sort();
+}
+
+/**
+ * Apply the cap rule to a name set — the SINGLE definition of it.
+ *
+ * Both halves of the wire route through here (the client before it builds the
+ * param, the server after it parses one), so the cap cannot be enforced at one
+ * value on one side and another value on the other. A second copy of `> 500`
+ * anywhere is the drift `single-wire-contract` exists to forbid.
+ */
+export function classifyInterestNames(names: Iterable<string>): InterestDeclaration {
+  const sorted = normalizeInterestNames(names);
+  if (sorted.length === 0) return { disposition: 'empty', declaredCount: 0, failsOpen: true };
+  if (sorted.length > MAX_DECLARED_QUERY_NAMES) {
+    return { disposition: 'over-cap', declaredCount: sorted.length, failsOpen: true };
+  }
+  return {
+    disposition: 'declared',
+    names: new Set(sorted),
+    declaredCount: sorted.length,
+    failsOpen: false,
+  };
+}
+
+/**
+ * Parse a raw declaration, reporting WHY as well as WHAT.
+ *
+ * `parseInterestParam` is derived from this rather than the other way round,
+ * so the fail-open table has one implementation and the disposition can never
+ * disagree with the filter actually applied.
+ */
+export function parseInterestDeclaration(raw: string | null | undefined): InterestDeclaration {
+  if (raw === null || raw === undefined) {
+    return { disposition: 'absent', declaredCount: 0, failsOpen: true };
+  }
+  return classifyInterestNames(raw.split(','));
 }
 
 /**
@@ -74,11 +141,12 @@ export function parseInterestParam(raw: string | null | undefined): Set<string> 
  * re-enumerated in a different order must not look like a change.
  */
 export function withInterestParam(url: string, names: Iterable<string>): string {
-  // Trim BEFORE de-duplicating, and use the same rule the parser uses: the two
-  // sides must agree on what a name IS, or the client can emit a declaration
-  // that the server normalises into a different set than the one intended.
-  const sorted = [...new Set([...names].map((n) => n.trim()))].filter((n) => n.length > 0).sort();
-  if (sorted.length === 0 || sorted.length > MAX_DECLARED_QUERY_NAMES) return url;
+  // Route through the SAME classifier the server parses with, rather than
+  // re-stating trim/dedupe/cap here: the two sides must agree on what a name
+  // IS and on where the cap sits, or the client can emit a declaration the
+  // server normalises into a different set than the one intended.
+  const { names: usable } = classifyInterestNames(names);
+  if (usable === undefined) return url;
   const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}${INTEREST_PARAM}=${encodeURIComponent(sorted.join(','))}`;
+  return `${url}${sep}${INTEREST_PARAM}=${encodeURIComponent([...usable].join(','))}`;
 }

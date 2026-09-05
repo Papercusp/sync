@@ -61,6 +61,11 @@ export {
 export {
   INTEREST_PARAM,
   MAX_DECLARED_QUERY_NAMES,
+  classifyInterestNames,
+  normalizeInterestNames,
+  parseInterestDeclaration,
   parseInterestParam,
   withInterestParam,
+  type InterestDeclaration,
+  type InterestDisposition,
 } from '../interest-protocol';
