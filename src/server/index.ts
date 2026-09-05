@@ -51,3 +51,16 @@ export {
   createPgNotifySink,
   type PgSqlLike,
 } from './pg-adapter';
+
+/**
+ * The interest-declaration wire contract. Shared with the CLIENT half rather
+ * than restated here: the param name is the only thing making the two sides
+ * agree, and a drifted copy fails silently (the server simply sees no
+ * declaration and falls back to full fan-out).
+ */
+export {
+  INTEREST_PARAM,
+  MAX_DECLARED_QUERY_NAMES,
+  parseInterestParam,
+  withInterestParam,
+} from '../interest-protocol';

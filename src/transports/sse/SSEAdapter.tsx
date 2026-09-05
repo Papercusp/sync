@@ -76,6 +76,8 @@ import {
   installSyncMetricsGlobal,
 } from '../../observability/metrics';
 import { emitSyncBusEvent, type SyncBusEvent } from '../../bus-tap';
+import { withInterestParam } from '../../interest-protocol';
+import { createInterestTracker } from './query-interest';
 import { reportSyncReachable, reportSyncUnreachable } from '../../connectivity';
 import type { SyncType } from '../../types';
 
@@ -141,9 +143,44 @@ function SSESubscriber({
 
     // Build the SSE URL once; both the initial open and reconnects use it.
     const baseUrl = endpointOverride ?? `${endpoint}/sse`;
-    const sseUrl = tokenQueryParam
+    const authedUrl = tokenQueryParam
       ? `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(tokenQueryParam)}`
       : baseUrl;
+
+    // Per-client invalidation filtering: declare the query names this browser
+    // actually observes, so the server skips fanning the rest down this
+    // socket. The declaration is the UNION across every tab sharing this
+    // stream (query-interest.ts) — one built from the owner tab's cache alone
+    // would silently starve the follower tabs, which is a worse bug than the
+    // fan-out it fixes and is invisible in the single-webview desktop case
+    // where it would most likely be tested (D-003c).
+    //
+    // `source` is assigned just below; growth can only be reported after the
+    // debounce window, but the guard keeps that ordering explicit rather than
+    // load-bearing.
+    let source: ReturnType<typeof createCrossTabControlStream> | null = null;
+    const interest = createInterestTracker({
+      queryClient,
+      // Strip query/hash so tabs differing only by token or declaration share
+      // one scope — the same keying createCrossTabControlStream uses to decide
+      // which tabs share a socket. These two MUST agree: tabs that share a
+      // socket but not a scope would each declare a partial union.
+      scope: baseUrl.split(/[?#]/, 1)[0] || baseUrl,
+      onGrow: (names) => {
+        if (!source) return;
+        // Every tab takes the new URL, so a follower that later wins the
+        // election opens with the current union rather than a stale set...
+        source.setUrl(withInterestParam(authedUrl, names));
+        // ...but only the tab holding the physical socket reconnects onto it.
+        // A follower calling reconnect() would force a needless re-election.
+        if (source.isOwner) source.reconnect();
+      },
+    });
+    const sseUrl = withInterestParam(authedUrl, interest.current());
+
+    // Mounting a query is what grows the set; the cache is the one place that
+    // sees every mount without useSyncQuery having to declare anything.
+    const unsubscribeCache = queryClient.getQueryCache().subscribe(() => interest.refresh());
 
     // Account for the consolidated control stream in the same per-origin
     // budget as finite requests. Only the elected physical owner holds this
@@ -249,7 +286,7 @@ function SSESubscriber({
       }
     };
 
-    const source = createCrossTabControlStream({
+    source = createCrossTabControlStream({
       url: sseUrl,
       initialBackoffMs: 1_000,
       maxBackoffMs: 30_000,
@@ -315,7 +352,9 @@ function SSESubscriber({
 
     return () => {
       syncMetrics.sseDisconnected();
-      source.close();
+      unsubscribeCache();
+      interest.close();
+      source?.close();
       controlStream?.release();
       controlStream = null;
     };
