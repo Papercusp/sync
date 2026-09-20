@@ -153,6 +153,57 @@ export function restorePersistedSyncCache(opts: PersistedSyncCacheOptions = {}):
 }
 
 /**
+ * Content-identity key for a dehydrated snapshot: everything that changes what
+ * a RESTORE would produce, and nothing that does not.
+ *
+ * WI-10002023. `dehydrateQuery` spreads the WHOLE `QueryState` into the
+ * snapshot, and most of that state is fetch BOOKKEEPING that react-query
+ * re-stamps on every successful fetch even when the rows are byte-identical:
+ * `dataUpdatedAt`, `dataUpdateCount`, `fetchStatus`, `isInvalidated`, plus the
+ * error/failure counters. Comparing the raw dehydrated state therefore reports
+ * "changed" for every REFETCH, so an app that merely revalidates on its 5s
+ * staleTime rewrote the entire snapshot every few seconds forever. Measured in
+ * the wild: an 11.4 GB `.localstorage-wal` growing ~374 MB/h behind a 4.3 MB
+ * database — and unreclaimable while the app holds the file open, because a
+ * TRUNCATE checkpoint cannot complete against a live read lock.
+ *
+ * The WI-5983 dedup did not catch it: that guard only ever saw cache events
+ * which left every query's state untouched, so the cheap `signature()` gate
+ * short-circuited before the content comparison was reached at all.
+ *
+ * This is an ALLOW-LIST deliberately. Enumerating the volatile fields instead
+ * would silently reintroduce the leak the next time react-query adds one.
+ * Queries are sorted by hash so cache eviction/re-admission reordering is not
+ * mistaken for a content change either.
+ */
+export function syncCacheContentKey(
+  state: ReturnType<typeof dehydrate>,
+  buster: string,
+): string {
+  const queries = (state.queries ?? [])
+    .map((q) => {
+      const s = q.state as { data?: unknown; status?: unknown; error?: unknown };
+      // Allow-list: queryKey/hash identify the entry, meta rides along on
+      // restore, and status/error/data are the only state a restore reads.
+      return {
+        hash: q.queryHash,
+        key: q.queryKey,
+        meta: q.meta,
+        status: s.status,
+        error: s.error,
+        data: s.data,
+      };
+    })
+    .sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
+  return JSON.stringify({
+    v: ENVELOPE_VERSION,
+    buster,
+    queries,
+    mutations: state.mutations,
+  });
+}
+
+/**
  * Subscribe to the query cache and write a debounced snapshot on change
  * (plus a final synchronous flush on pagehide). Returns a dispose fn.
  * Persists only SUCCESSFUL queries, and skips any query whose
@@ -179,6 +230,10 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
   // backend). Skipping the identical write breaks that loop without touching
   // the debounce/backoff semantics for the normal (data-changing) case.
   let lastWrittenContent: string | null = null;
+  // WI-10002023: when the last write physically landed, so an unchanging
+  // snapshot can still be refreshed before `maxAgeMs` ages it out on restore.
+  let lastWrittenAt = 0;
+  const refreshAfterMs = (opts.maxAgeMs ?? DEFAULT_MAX_AGE_MS) / 2;
 
   // WI-6502 (owner-reported typing lag). The dedup above is O(BYTES): it has to
   // dehydrate the whole cache and run a replacer-stringify over it just to
@@ -273,11 +328,17 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
       // call-time noise unrelated to whether the underlying data changed —
       // so leaving it in the comparison would make every flush look "new"
       // and defeat the dedup entirely).
-      const content = JSON.stringify(
-        { v: ENVELOPE_VERSION, buster: opts.buster ?? '', state },
-        (k, v) => (k === 'dehydratedAt' ? undefined : v),
-      );
-      if (content === lastWrittenContent) return; // nothing persistable changed — skip the write
+      const content = syncCacheContentKey(state, opts.buster ?? '');
+      // WI-10002023: identical CONTENT still gets a periodic rewrite, because
+      // the envelope's `ts` is what `restorePersistedSyncCache` ages out
+      // against `maxAgeMs`. Without this, a dataset that is merely revalidated
+      // (never changed) would stop being rewritten, let its stored `ts` pass
+      // maxAgeMs, and lose stale-while-revalidate on the next boot. Refreshing
+      // at half the max age keeps the snapshot restorable forever at ~2 writes
+      // a day, against the ~8,600 a day the un-deduped path was doing.
+      if (content === lastWrittenContent && Date.now() - lastWrittenAt < refreshAfterMs) {
+        return; // nothing persistable changed and the snapshot is still young
+      }
       const serialized = JSON.stringify({
         v: ENVELOPE_VERSION,
         buster: opts.buster ?? '',
@@ -295,6 +356,7 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
       }
       storage.setItem(key, serialized);
       lastWrittenContent = content;
+      lastWrittenAt = Date.now();
       consecutiveFailures = 0;
     } catch {
       // Quota / serialization failure: drop the stored snapshot so restore

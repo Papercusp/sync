@@ -7,12 +7,27 @@
  * debounce.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, dehydrate } from '@tanstack/react-query';
 import {
   restorePersistedSyncCache,
   startSyncCachePersistence,
+  syncCacheContentKey,
   type SyncCacheStorage,
 } from './persisted-cache';
+
+/**
+ * The PRE-FIX comparison (the WI-6502 shape): the entire dehydrated state with
+ * only `dehydratedAt` excluded. Kept PERMANENTLY as a falsifiability control
+ * for the WI-10002023 tests below — it must report "changed" for a
+ * bookkeeping-only delta that the real `syncCacheContentKey` reports as
+ * unchanged. If this control ever stops discriminating, the guard beneath it
+ * has stopped proving anything and the WAL leak could return unnoticed.
+ */
+function legacyContentKey(state: ReturnType<typeof dehydrate>): string {
+  return JSON.stringify({ v: 1, buster: '', state }, (k, v) =>
+    k === 'dehydratedAt' ? undefined : v,
+  );
+}
 
 function memoryStorage(): SyncCacheStorage & { map: Map<string, string> } {
   const map = new Map<string, string>();
@@ -105,6 +120,91 @@ describe('persisted sync cache', () => {
     vi.advanceTimersByTime(1000);
     expect(setSpy).toHaveBeenCalledTimes(2);
     stop();
+  });
+
+  it('WI-10002023: a REFETCH returning identical data does not rewrite the snapshot', () => {
+    // The WI-5983 guard above only ever fired cache events that left every
+    // query's state untouched, so the cheap signature() gate short-circuited
+    // before the content comparison was reached. The real leak is the other
+    // path: a query that genuinely REFETCHES and gets byte-identical rows back
+    // bumps dataUpdatedAt/dataUpdateCount inside the dehydrated state, which
+    // changed the signature AND defeated the content dedup — so the whole
+    // snapshot was rewritten every few seconds. Measured in the wild as an
+    // 11.4 GB localstorage WAL growing ~374 MB/h behind a 4.3 MB database.
+    const storage = memoryStorage();
+    const setSpy = vi.spyOn(storage, 'setItem');
+    const client = track(new QueryClient());
+    const stop = startSyncCachePersistence({ client, storage });
+    client.setQueryData(['sync', 'q', {}], { rows: [1] });
+    vi.advanceTimersByTime(1000);
+    expect(setSpy).toHaveBeenCalledTimes(1);
+
+    // 20 revalidations returning exactly the same rows — what an idle desktop
+    // does all day under a 5s staleTime plus SSE invalidation.
+    for (let cycle = 0; cycle < 20; cycle++) {
+      client.setQueryData(['sync', 'q', {}], { rows: [1] });
+      vi.advanceTimersByTime(1000);
+    }
+    expect(setSpy).toHaveBeenCalledTimes(1);
+
+    // Calibration: a REAL data change must still write, or the assertion above
+    // would also pass for a persistence layer that simply stopped working.
+    client.setQueryData(['sync', 'q', {}], { rows: [1, 2] });
+    vi.advanceTimersByTime(1000);
+    expect(setSpy).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('WI-10002023: the content key ignores fetch bookkeeping but never real data', () => {
+    const client = track(new QueryClient());
+    client.setQueryData(['sync', 'q', {}], { rows: [1] });
+    const before = dehydrate(client);
+    client.setQueryData(['sync', 'q', {}], { rows: [1] }); // refetch, same rows
+    const after = dehydrate(client);
+
+    // Falsifiability control: the bookkeeping really DID change between these
+    // two snapshots, so the assertion that follows is not vacuous.
+    expect(legacyContentKey(after)).not.toEqual(legacyContentKey(before));
+
+    // ...and the allow-list key correctly calls them identical.
+    expect(syncCacheContentKey(after, '')).toEqual(syncCacheContentKey(before, ''));
+
+    // Calibration: a genuine data change must still change the key.
+    client.setQueryData(['sync', 'q', {}], { rows: [1, 2] });
+    expect(syncCacheContentKey(dehydrate(client), '')).not.toEqual(
+      syncCacheContentKey(before, ''),
+    );
+  });
+
+  it('WI-10002023: an unchanged snapshot is still refreshed before maxAgeMs ages it out', () => {
+    // Suppressing identical writes must not let the envelope `ts` drift past
+    // maxAgeMs, or restore would silently drop the snapshot and the app would
+    // lose stale-while-revalidate on the next boot.
+    const maxAgeMs = 24 * 60 * 60 * 1000;
+    const storage = memoryStorage();
+    const setSpy = vi.spyOn(storage, 'setItem');
+    // gcTime:Infinity isolates the variable under test. With the default
+    // gcTime, the 13h jump below would garbage-collect this observer-less
+    // query mid-flight and the eviction (a genuine content change) would be
+    // counted as if it were the refresh this test is asserting.
+    const client = track(new QueryClient({ defaultOptions: { queries: { gcTime: Infinity } } }));
+    const stop = startSyncCachePersistence({ client, storage, maxAgeMs });
+    client.setQueryData(['sync', 'q', {}], { rows: [1] });
+    vi.advanceTimersByTime(1000);
+    expect(setSpy).toHaveBeenCalledTimes(1);
+
+    // Past half the max age, the next revalidation rewrites even though the
+    // rows never changed — ~2 writes a day, not the ~8,600 the leak produced.
+    vi.advanceTimersByTime(13 * 60 * 60 * 1000);
+    client.setQueryData(['sync', 'q', {}], { rows: [1] });
+    vi.advanceTimersByTime(1000);
+    expect(setSpy).toHaveBeenCalledTimes(2);
+
+    // The refreshed snapshot is still restorable.
+    stop();
+    const target = track(new QueryClient());
+    expect(restorePersistedSyncCache({ client: target, storage, maxAgeMs })).toBe(true);
+    expect(target.getQueryData(['sync', 'q', {}])).toEqual({ rows: [1] });
   });
 
   it('drops a snapshot written under a different buster', () => {
