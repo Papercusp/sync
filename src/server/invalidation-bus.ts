@@ -185,7 +185,11 @@ export interface InvalidationBus {
   /** Eagerly start the ListenSource (otherwise lazy on first subscribe). */
   start(): Promise<void>;
   stop(): Promise<void>;
-  /** Inspection / tests. */
+  /**
+   * Inspection / tests. The raw ring length: between push-time prunes it can
+   * include events up to a quarter window past retention (backfillSince never
+   * returns them).
+   */
   historySize(): number;
 }
 
@@ -266,8 +270,24 @@ export function createInvalidationBus(
 
   let startPromise: Promise<void> | null = null;
 
+  /**
+   * P-525 (p2p-join-catchup-speed D-013): a push prunes the ring at most once
+   * per quarter window. Filtering the whole ring on EVERY push made each event
+   * cost O(ring); a bulk fold's per-row trigger events turned that into ~18% of
+   * the main thread (measured on the P-007 VM). While events keep arriving the
+   * ring holds at most 1.25 windows of them. Replay stays exact: backfillSince
+   * prunes in full before it reads.
+   */
+  const prunePeriodMs = Number.isFinite(historyWindowMs) ? Math.max(0, historyWindowMs / 4) : 0;
+  let lastPruneAt = Number.NEGATIVE_INFINITY;
+
+  function maybePruneHistory(): void {
+    if (now() - lastPruneAt >= prunePeriodMs) pruneHistory();
+  }
+
   function pruneHistory(): void {
-    const cutoff = now() - historyWindowMs;
+    lastPruneAt = now();
+    const cutoff = lastPruneAt - historyWindowMs;
     // A trailing bridge event is intentionally emitted after later raw events
     // may already be in the ring, while retaining the latest source timestamp
     // for freshness measurement. Do not assume `ts` is sorted by insertion
@@ -282,7 +302,7 @@ export function createInvalidationBus(
 
   function fanout(ev: SyncEvent): void {
     history.push(ev);
-    pruneHistory();
+    maybePruneHistory();
     for (const s of subscribers) {
       try {
         // Drop ONLY on positive knowledge: a predicate that throws, or that

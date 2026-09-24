@@ -251,6 +251,39 @@ describe('invalidation-bus', () => {
     expect(bus.historySize()).toBe(0);
   });
 
+  it('P-525: a push prunes the ring at most once per quarter window; replay stays exact', async () => {
+    // A full-ring filter on every push made each event O(ring), which a bulk
+    // fold's per-row trigger events turned into ~18% of the main thread.
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      historyWindowMs: 4000, // prune period 1000
+    });
+    await bus.subscribe(() => {});
+    const push = (i: number) => lb.deliver(JSON.stringify({ name: 'q', args: { i } }));
+
+    push(1); // t=1000: prunes
+    clock.t = 4500;
+    push(2); // 3500 ms since the last prune: prunes, nothing expired yet
+    clock.t = 5100; // event 1 (ts 1000) is now past the 4000 ms window
+    push(3); // 600 ms since the last prune: no prune, the expired event is still held
+    expect(bus.historySize()).toBe(3);
+
+    // Replay never returns the expired event, and it prunes the ring exactly.
+    expect(bus.backfillSince(0).map((e) => e.args?.i)).toEqual([2, 3]);
+    expect(bus.historySize()).toBe(2);
+
+    clock.t = 5600;
+    push(4); // 500 ms since backfill's prune: held
+    clock.t = 9000; // event 2 (ts 4500) expires; 3 (5100) and 4 (5600) do not
+    push(5); // a full period since the last prune: prunes
+    expect(bus.historySize()).toBe(3);
+    expect(bus.backfillSince(0).map((e) => e.args?.i)).toEqual([3, 4, 5]);
+  });
+
   // ── Audit P-066/P-067: dedupe key hashes data; stop() drains ──────────────
 
   it('data-bearing notifies dedupe by content; a new row set passes (hashed key)', async () => {
