@@ -22,15 +22,32 @@ describe('syncMetrics counters', () => {
     try {
       const finish = syncMetrics.beginIpcAssertion();
       const pending = syncMetrics.snapshot().ipcAssertion!;
-      expect(pending).toEqual([{ startedAtMs: 100, completedAtMs: null, client: null }]);
+      expect(pending).toEqual([{ startedAtMs: 100, importReadyAtMs: null, invokeStartedAtMs: null,
+        invokeCompletedAtMs: null, completedAtMs: null, client: null }]);
+      clock.mockReturnValue(1_100);
+      finish.mark('importReady');
+      clock.mockReturnValue(1_200);
+      finish.mark('invokeStarted');
+      const invoking = syncMetrics.snapshot().ipcAssertion![0];
+      expect(invoking.importReadyAtMs! - invoking.startedAtMs).toBe(1_000);
+      expect(invoking.invokeCompletedAtMs).toBeNull();
+      clock.mockReturnValue(6_000);
+      finish.mark('invokeCompleted');
       clock.mockReturnValue(6_100);
       finish('connected');
       expect(syncMetrics.snapshot().ipcAssertion).toEqual([
-        { startedAtMs: 100, completedAtMs: 6_100, client: 'connected' },
+        { startedAtMs: 100, importReadyAtMs: 1_100, invokeStartedAtMs: 1_200,
+          invokeCompletedAtMs: 6_000, completedAtMs: 6_100, client: 'connected' },
       ]);
+      expect(invoking.invokeCompletedAtMs).toBeNull();
       expect(pending[0].completedAtMs).toBeNull();
+      clock.mockReturnValue(7_100);
+      finish.mark('importReady'); // Neither duplicate phases nor late marks rewrite the attempt.
+      finish.mark('invokeCompleted');
       finish('dead'); // A duplicate completion cannot rewrite the observation.
       expect(syncMetrics.snapshot().ipcAssertion![0].client).toBe('connected');
+      expect(syncMetrics.snapshot().ipcAssertion![0].importReadyAtMs).toBe(1_100);
+      expect(syncMetrics.snapshot().ipcAssertion![0].invokeCompletedAtMs).toBe(6_000);
       for (let i = 0; i < 70; i++) syncMetrics.beginIpcAssertion()(null);
       expect(syncMetrics.snapshot().ipcAssertion).toHaveLength(64);
       syncMetrics.__resetForTests();
@@ -38,6 +55,17 @@ describe('syncMetrics counters', () => {
     } finally {
       clock.mockRestore();
     }
+  });
+
+  it('keeps invoke phases absent when an assertion fails during module import', () => {
+    const finish = syncMetrics.beginIpcAssertion();
+    finish(null);
+    const sample = syncMetrics.snapshot().ipcAssertion![0];
+    expect(sample.importReadyAtMs).toBeNull();
+    expect(sample.invokeStartedAtMs).toBeNull();
+    expect(sample.invokeCompletedAtMs).toBeNull();
+    expect(sample.completedAtMs).not.toBeNull();
+    expect(sample.client).toBeNull();
   });
 
   it('counts SSE events and bytes', () => {

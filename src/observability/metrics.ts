@@ -157,8 +157,10 @@ export interface SyncMetricsSnapshot {
    */
   ipcAssertTimedOut?: boolean;
   ipcAssertLastClient?: string | null;
-  /** Last 64 assertion attempts; null completion distinguishes a still-pending invoke. */
-  ipcAssertion?: Array<{ startedAtMs: number; completedAtMs: number | null; client: string | null }>;
+  /** Last 64 attempts on the query clock; null phases distinguish import from invoke waits. */
+  ipcAssertion?: Array<{ startedAtMs: number; importReadyAtMs: number | null;
+    invokeStartedAtMs: number | null; invokeCompletedAtMs: number | null;
+    completedAtMs: number | null; client: string | null }>;
   sse: {
     /** ms since the current connection opened, or null when disconnected. */
     connectedSinceMs: number | null;
@@ -440,16 +442,25 @@ export const syncMetrics = {
     state.ipcAssertTimedOut = true;
     state.ipcAssertLastClient = lastClient;
   },
-  /** Includes dynamic-import + shell-invoke time on the same performance.now clock as queries. */
-  beginIpcAssertion(): (client: string | null) => void {
-    const sample = { startedAtMs: now(), completedAtMs: null as number | null, client: null as string | null };
+  /** Separate dynamic-import and shell-invoke phases on the queries' performance.now clock. */
+  beginIpcAssertion() {
+    const sample: NonNullable<SyncMetricsSnapshot['ipcAssertion']>[number] = {
+      startedAtMs: now(), importReadyAtMs: null, invokeStartedAtMs: null,
+      invokeCompletedAtMs: null, completedAtMs: null, client: null,
+    };
     state.ipcAssertion.push(sample);
     if (state.ipcAssertion.length > 64) state.ipcAssertion.shift();
-    return (client) => {
+    return Object.assign((client: string | null) => {
       if (sample.completedAtMs !== null) return;
       sample.completedAtMs = now();
       sample.client = client;
-    };
+    }, {
+      mark(stage: 'importReady' | 'invokeStarted' | 'invokeCompleted'): void {
+        const key = `${stage}AtMs` as const;
+        // Preserve the first observation and never mutate a completed attempt.
+        if (sample.completedAtMs === null && sample[key] === null) sample[key] = now();
+      },
+    });
   },
   /**
    * Record one freshness stage. All accepted values are explicitly milliseconds;
