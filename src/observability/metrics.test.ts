@@ -80,6 +80,37 @@ describe('syncMetrics counters', () => {
     });
   });
 
+  it('retains native execution separately from a delayed invoke reply', () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+    try {
+      const finish = syncMetrics.beginIpcAssertion();
+      finish.mark('invokeStarted');
+      clock.mockReturnValue(10_000);
+      finish.mark('invokeCompleted');
+      finish.recordNative(120, 0.5);
+      finish('connected');
+      const saved = syncMetrics.snapshot().ipcAssertion![0];
+      expect(saved.nativeStartedAtMs).toBe(120);
+      expect(saved.nativeDurationMs).toBe(0.5);
+      expect(saved.invokeCompletedAtMs! - saved.invokeStartedAtMs!).toBe(9_900);
+      saved.nativeDurationMs = 9_900;
+      finish.recordNative(200, 5);
+      expect(syncMetrics.snapshot().ipcAssertion![0].nativeDurationMs).toBe(0.5);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each([[NaN, 1], [100, Infinity], [-1, 1], [100, -1]])(
+    'omits invalid native timing (%s, %s) instead of reporting zero work', (start, duration) => {
+      const finish = syncMetrics.beginIpcAssertion();
+      finish.recordNative(start, duration);
+      finish('connected');
+      expect(syncMetrics.snapshot().ipcAssertion![0].nativeStartedAtMs).toBeUndefined();
+      expect(syncMetrics.snapshot().ipcAssertion![0].nativeDurationMs).toBeUndefined();
+    },
+  );
+
   it('counts SSE events and bytes', () => {
     syncMetrics.sseEventReceived(100);
     syncMetrics.sseEventReceived(50);

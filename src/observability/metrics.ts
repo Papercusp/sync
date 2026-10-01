@@ -160,7 +160,8 @@ export interface SyncMetricsSnapshot {
   /** Last 64 attempts on the query clock; null phases distinguish import from invoke waits. */
   ipcAssertion?: Array<{ startedAtMs: number; importReadyAtMs: number | null;
     invokeStartedAtMs: number | null; invokeCompletedAtMs: number | null;
-    completedAtMs: number | null; client: string | null; error?: string }>;
+    completedAtMs: number | null; client: string | null; error?: string;
+    nativeStartedAtMs?: number; nativeDurationMs?: number }>;
   sse: {
     /** ms since the current connection opened, or null when disconnected. */
     connectedSinceMs: number | null;
@@ -460,6 +461,13 @@ export const syncMetrics = {
         const key = `${stage}AtMs` as const;
         // Preserve the first observation and never mutate a completed attempt.
         if (sample.completedAtMs === null && sample[key] === null) sample[key] = now();
+      },
+      recordNative(startedAtMs: number, durationMs: number): void {
+        if (sample.completedAtMs !== null || sample.nativeStartedAtMs !== undefined) return;
+        if (!Number.isFinite(startedAtMs) || startedAtMs < 0 ||
+            !Number.isFinite(durationMs) || durationMs < 0) return;
+        sample.nativeStartedAtMs = startedAtMs;
+        sample.nativeDurationMs = durationMs;
       },
     });
   },
