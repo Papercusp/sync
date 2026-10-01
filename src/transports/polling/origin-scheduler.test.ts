@@ -23,6 +23,51 @@ afterEach(() => {
 });
 
 describe('createOriginScheduler', () => {
+  it('identifies the occupying finite request and preserves queue/admission/cap timing', async () => {
+    let clock = 10;
+    const scheduler = createOriginScheduler({ limit: 1, now: () => clock, requestTimeoutMs: 0 });
+    const hold = deferred<void>();
+    const first = scheduler.run(() => hold.promise, { label: 'GET /api/bootstrap' });
+    await tick();
+    clock = 20;
+    const second = scheduler.run(() => { clock = 60; }, { label: 'GET /api/profile' });
+    const queued = scheduler.snapshot().tasks!;
+    expect(queued).toMatchObject([
+      { label: 'GET /api/bootstrap', state: 'running', enqueuedAtMs: 10, startedAtMs: 10, settledAtMs: null },
+      { label: 'GET /api/profile', state: 'queued', enqueuedAtMs: 20, startedAtMs: null, settledAtMs: null,
+        limitAtEnqueue: 1, limitAtStart: null },
+    ]);
+    clock = 50;
+    scheduler.setLimit(2);
+    await second;
+    expect(scheduler.snapshot().tasks![1]).toMatchObject({ state: 'ok', startedAtMs: 50,
+      settledAtMs: 60, limitAtEnqueue: 1, limitAtStart: 2 });
+    expect(queued[1].state).toBe('queued'); // A prior snapshot cannot change beneath a diagnostic.
+    clock = 70;
+    hold.resolve();
+    await first;
+    expect(scheduler.snapshot().tasks![0].settledAtMs).toBe(70);
+    scheduler.close();
+  });
+
+  it('bounds labelled evidence and distinguishes a cancelled waiter from a sent request', async () => {
+    const scheduler = createOriginScheduler({ limit: 1, requestTimeoutMs: 0 });
+    for (let i = 0; i < 130; i++) await scheduler.run(() => i, { label: 'x'.repeat(300) });
+    expect(scheduler.snapshot().tasks).toHaveLength(128);
+    expect(scheduler.snapshot().tasks![0].label).toHaveLength(200);
+    const hold = deferred<void>();
+    const first = scheduler.run(() => hold.promise, { label: 'busy' });
+    const controller = new AbortController();
+    const waiter = scheduler.run(() => 'must not run', { label: 'cancelled', signal: controller.signal });
+    controller.abort();
+    await expect(waiter).rejects.toBeDefined();
+    expect(scheduler.snapshot().tasks!.at(-1)).toMatchObject({ state: 'aborted', startedAtMs: null });
+    expect(scheduler.snapshot().tasks!.at(-1)!.settledAtMs).not.toBeNull();
+    hold.resolve();
+    await first;
+    scheduler.close();
+  });
+
   it('prioritizes interactive work and keeps an exclusive interactive reservation', async () => {
     const scheduler = createOriginScheduler({ limit: 3, requestTimeoutMs: 1_000 });
     const releases = [deferred<void>(), deferred<void>(), deferred<void>()];

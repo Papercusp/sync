@@ -157,6 +157,8 @@ export interface SyncMetricsSnapshot {
    */
   ipcAssertTimedOut?: boolean;
   ipcAssertLastClient?: string | null;
+  /** Last 64 assertion attempts; null completion distinguishes a still-pending invoke. */
+  ipcAssertion?: Array<{ startedAtMs: number; completedAtMs: number | null; client: string | null }>;
   sse: {
     /** ms since the current connection opened, or null when disconnected. */
     connectedSinceMs: number | null;
@@ -227,6 +229,7 @@ interface MetricsState {
   invalidationsBySseName: Map<string, number>;
   ipcAssertTimedOut: boolean | undefined;
   ipcAssertLastClient: string | null;
+  ipcAssertion: NonNullable<SyncMetricsSnapshot['ipcAssertion']>;
   transport: {
     requests: number;
     failures: number;
@@ -273,6 +276,7 @@ const state: MetricsState = {
   invalidationsBySseName: new Map(),
   ipcAssertTimedOut: undefined,
   ipcAssertLastClient: null,
+  ipcAssertion: [],
   transport: freshTransport(),
   byQuery: new Map(),
   recent: [],
@@ -436,6 +440,17 @@ export const syncMetrics = {
     state.ipcAssertTimedOut = true;
     state.ipcAssertLastClient = lastClient;
   },
+  /** Includes dynamic-import + shell-invoke time on the same performance.now clock as queries. */
+  beginIpcAssertion(): (client: string | null) => void {
+    const sample = { startedAtMs: now(), completedAtMs: null as number | null, client: null as string | null };
+    state.ipcAssertion.push(sample);
+    if (state.ipcAssertion.length > 64) state.ipcAssertion.shift();
+    return (client) => {
+      if (sample.completedAtMs !== null) return;
+      sample.completedAtMs = now();
+      sample.client = client;
+    };
+  },
   /**
    * Record one freshness stage. All accepted values are explicitly milliseconds;
    * invalid writer values are counted and dropped rather than becoming plausible
@@ -545,6 +560,7 @@ export const syncMetrics = {
     }
     return {
       takenAtMs: now(),
+      ...(state.ipcAssertion.length ? { ipcAssertion: state.ipcAssertion.map((sample) => ({ ...sample })) } : {}),
       ...(state.ipcAssertTimedOut === undefined
         ? {}
         : {
@@ -595,6 +611,7 @@ export const syncMetrics = {
     state.invalidationsBySseName.clear();
     state.ipcAssertTimedOut = undefined;
     state.ipcAssertLastClient = null;
+    state.ipcAssertion.length = 0;
     state.transport = freshTransport();
     state.byQuery.clear();
     state.recent.length = 0;

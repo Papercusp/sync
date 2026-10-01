@@ -4,7 +4,7 @@
  * Tests for the in-memory sync metrics counters + the window global installer.
  * Run with: npx vitest run libs/generic/sync/src/observability/metrics.test.ts
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   syncMetrics,
   installSyncMetricsGlobal,
@@ -17,6 +17,29 @@ import { createOriginScheduler } from '../transports/polling/origin-scheduler';
 beforeEach(() => syncMetrics.__resetForTests());
 
 describe('syncMetrics counters', () => {
+  it('retains pending IPC assertion time separately from its completed client result', () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+    try {
+      const finish = syncMetrics.beginIpcAssertion();
+      const pending = syncMetrics.snapshot().ipcAssertion!;
+      expect(pending).toEqual([{ startedAtMs: 100, completedAtMs: null, client: null }]);
+      clock.mockReturnValue(6_100);
+      finish('connected');
+      expect(syncMetrics.snapshot().ipcAssertion).toEqual([
+        { startedAtMs: 100, completedAtMs: 6_100, client: 'connected' },
+      ]);
+      expect(pending[0].completedAtMs).toBeNull();
+      finish('dead'); // A duplicate completion cannot rewrite the observation.
+      expect(syncMetrics.snapshot().ipcAssertion![0].client).toBe('connected');
+      for (let i = 0; i < 70; i++) syncMetrics.beginIpcAssertion()(null);
+      expect(syncMetrics.snapshot().ipcAssertion).toHaveLength(64);
+      syncMetrics.__resetForTests();
+      expect(syncMetrics.snapshot().ipcAssertion).toBeUndefined();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('counts SSE events and bytes', () => {
     syncMetrics.sseEventReceived(100);
     syncMetrics.sseEventReceived(50);
