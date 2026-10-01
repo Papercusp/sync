@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   createInvalidationBus,
+  MAX_BRIDGE_COALESCE_WINDOW_MS,
   type ListenSource,
   type NotifySink,
   type SyncEvent,
@@ -565,6 +566,105 @@ describe('invalidation-bus', () => {
     const lists = events.filter((e) => e.name === 'shared.list');
     expect(lists).toHaveLength(3);
     expect(lists[2]).toMatchObject({ ts: 2100 });
+    expect(timers.pending).toBe(0);
+
+    await bus.stop();
+  });
+
+  // D-012 (papercusp-log-performance-remediation-2026-09-23): under sustained
+  // writes the trailing window, not the 90s floor, sets the delivered rate. A
+  // per-target override lengthens it for an expensive target only.
+  it('a per-target coalesce override slows only that target during a sustained burst, and still delivers the final write', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const timers = makeTimerHarness();
+    const policyCalls: Array<[string, string]> = [];
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      bridge: (name) => (name === 'harness_shared.hot.changed' ? ['expensive.list', 'cheap.list'] : []),
+      bridgedCoalesceWindowMs: (queryName, sourceName) => {
+        policyCalls.push([queryName, sourceName]);
+        return queryName === 'expensive.list' ? 10_000 : undefined;
+      },
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+    const count = (name: string) => events.filter((e) => e.name === name).length;
+
+    // One write every 500ms for 20s (41 writes). Elapsed timers fire first at
+    // each instant, then the write lands, as with real time.
+    for (let t = 1000; t <= 21_000; t += 500) {
+      clock.t = t;
+      timers.fireAll();
+      lb.deliver(JSON.stringify({ name: 'harness_shared.hot.changed', args: { t } }));
+    }
+
+    // Default 2s bound: leading at 1000, then trailing at 3500, 5500, ..., 19500.
+    expect(count('cheap.list')).toBe(10);
+    // 10s override: leading at 1000, then a single trailing event at 11500.
+    expect(count('expensive.list')).toBe(2);
+
+    // The final write is not hidden beyond the window: the pending fire anchored
+    // at 11500 is delivered at 21500, carrying the LAST write's timestamp.
+    clock.t = 21_500;
+    timers.fireAll();
+    const expensive = events.filter((e) => e.name === 'expensive.list');
+    expect(expensive).toHaveLength(3);
+    expect(expensive[2]).toMatchObject({ ts: 21_000 });
+    expect(count('cheap.list')).toBe(11);
+    expect(timers.pending).toBe(0);
+
+    // The policy sees (queryName, sourceEventName), same order as the dedupe hook.
+    expect(policyCalls[0]).toEqual(['expensive.list', 'harness_shared.hot.changed']);
+    expect(policyCalls[1]).toEqual(['cheap.list', 'harness_shared.hot.changed']);
+
+    await bus.stop();
+  });
+
+  it('clamps a per-target coalesce override to MAX_BRIDGE_COALESCE_WINDOW_MS and ignores non-finite values', async () => {
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const timers = makeTimerHarness();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      bridge: (name) => (name === 'harness_shared.hot.changed' ? ['huge.list', 'nan.list'] : []),
+      // An hour must not hide a write for an hour; NaN must not disable the bound.
+      bridgedCoalesceWindowMs: (queryName) =>
+        queryName === 'huge.list' ? 3_600_000 : queryName === 'nan.list' ? Number.NaN : undefined,
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+    const count = (name: string) => events.filter((e) => e.name === name).length;
+
+    lb.deliver(JSON.stringify({ name: 'harness_shared.hot.changed', args: { n: 0 } }));
+    clock.t = 1500;
+    lb.deliver(JSON.stringify({ name: 'harness_shared.hot.changed', args: { n: 1 } }));
+    expect(count('huge.list')).toBe(1);
+    expect(count('nan.list')).toBe(1);
+
+    // NaN falls back to the bus default (2s): trailing at 1500 + 2000.
+    clock.t = 3500;
+    timers.fireAll();
+    expect(count('nan.list')).toBe(2);
+    expect(count('huge.list')).toBe(1);
+
+    // The oversized override is clamped to the library ceiling.
+    clock.t = 1500 + MAX_BRIDGE_COALESCE_WINDOW_MS - 1;
+    timers.fireAll();
+    expect(count('huge.list')).toBe(1);
+    clock.t = 1500 + MAX_BRIDGE_COALESCE_WINDOW_MS;
+    timers.fireAll();
+    expect(count('huge.list')).toBe(2);
     expect(timers.pending).toBe(0);
 
     await bus.stop();
