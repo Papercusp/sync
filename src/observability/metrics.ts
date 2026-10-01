@@ -161,7 +161,11 @@ export interface SyncMetricsSnapshot {
   ipcAssertion?: Array<{ startedAtMs: number; importReadyAtMs: number | null;
     invokeStartedAtMs: number | null; invokeCompletedAtMs: number | null;
     completedAtMs: number | null; client: string | null; error?: string;
-    nativeStartedAtMs?: number; nativeDurationMs?: number }>;
+    nativeStartedAtMs?: number; nativeDurationMs?: number;
+    renderer?: { unit: 'ms'; clock: 'performance.now'; intervalMs: number;
+      startedAtMs: number; lastObservedAtMs: number; timerTicks: number; maxGapMs: number;
+      gaps: Array<{ startedAtMs: number; completedAtMs: number; durationMs: number }>;
+      stoppedAtMs: number | null; stopReason: 'reply' | 'deadline' | null } }>;
   sse: {
     /** ms since the current connection opened, or null when disconnected. */
     connectedSinceMs: number | null;
@@ -469,6 +473,35 @@ export const syncMetrics = {
         sample.nativeStartedAtMs = startedAtMs;
         sample.nativeDurationMs = durationMs;
       },
+      startRenderer(intervalMs: number): void {
+        if (sample.completedAtMs !== null || sample.renderer ||
+            !Number.isFinite(intervalMs) || intervalMs <= 0) return;
+        const at = now();
+        sample.renderer = { unit: 'ms', clock: 'performance.now', intervalMs,
+          startedAtMs: at, lastObservedAtMs: at, timerTicks: 0, maxGapMs: 0,
+          gaps: [], stoppedAtMs: null, stopReason: null };
+      },
+      observeRenderer(reason: 'timer' | 'reply' | 'deadline'): void {
+        const renderer = sample.renderer;
+        if (!renderer || renderer.stoppedAtMs !== null || sample.completedAtMs !== null) return;
+        const at = now();
+        const durationMs = at - renderer.lastObservedAtMs;
+        if (!Number.isFinite(durationMs) || durationMs < 0) return;
+        // This observes timer execution, not CPU work. A gap may also mean
+        // renderer scheduling/suspension; responsive ticks during a slow
+        // native reply distinguish that delivery path from such a gap.
+        renderer.maxGapMs = Math.max(renderer.maxGapMs, durationMs);
+        if (durationMs >= renderer.intervalMs * 2) {
+          renderer.gaps.push({ startedAtMs: renderer.lastObservedAtMs, completedAtMs: at, durationMs });
+          if (renderer.gaps.length > 8) renderer.gaps.shift();
+        }
+        renderer.lastObservedAtMs = at;
+        if (reason === 'timer') renderer.timerTicks++;
+        else {
+          renderer.stoppedAtMs = at;
+          renderer.stopReason = reason;
+        }
+      },
     });
   },
   /**
@@ -580,7 +613,10 @@ export const syncMetrics = {
     }
     return {
       takenAtMs: now(),
-      ...(state.ipcAssertion.length ? { ipcAssertion: state.ipcAssertion.map((sample) => ({ ...sample })) } : {}),
+      ...(state.ipcAssertion.length ? { ipcAssertion: state.ipcAssertion.map((sample) => ({ ...sample,
+        ...(sample.renderer ? { renderer: { ...sample.renderer,
+          gaps: sample.renderer.gaps.map((gap) => ({ ...gap })) } } : {}),
+      })) } : {}),
       ...(state.ipcAssertTimedOut === undefined
         ? {}
         : {

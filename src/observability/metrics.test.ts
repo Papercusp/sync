@@ -101,6 +101,60 @@ describe('syncMetrics counters', () => {
     }
   });
 
+  it('distinguishes responsive renderer timers from the final unobserved reply interval', () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+    try {
+      const finish = syncMetrics.beginIpcAssertion();
+      finish.startRenderer(50);
+      for (const at of [150, 200, 250]) {
+        clock.mockReturnValue(at);
+        finish.observeRenderer('timer');
+      }
+      const pending = syncMetrics.snapshot().ipcAssertion![0].renderer!;
+      expect(pending).toMatchObject({ timerTicks: 3, maxGapMs: 50, stoppedAtMs: null, gaps: [] });
+      // Promise continuations can run before the delayed timer. The completion
+      // boundary must capture this gap without fabricating another timer tick.
+      clock.mockReturnValue(4_600);
+      finish.observeRenderer('reply');
+      finish('connected');
+      const saved = syncMetrics.snapshot().ipcAssertion![0].renderer!;
+      expect(saved).toMatchObject({ timerTicks: 3, maxGapMs: 4_350,
+        stoppedAtMs: 4_600, stopReason: 'reply', unit: 'ms', clock: 'performance.now' });
+      expect(saved.gaps).toEqual([{ startedAtMs: 250, completedAtMs: 4_600, durationMs: 4_350 }]);
+      expect(pending.gaps).toEqual([]);
+      saved.gaps[0].durationMs = 0;
+      saved.gaps.push({ startedAtMs: 0, completedAtMs: 0, durationMs: 0 });
+      finish.observeRenderer('timer');
+      expect(syncMetrics.snapshot().ipcAssertion![0].renderer!.gaps).toEqual([
+        { startedAtMs: 250, completedAtMs: 4_600, durationMs: 4_350 },
+      ]);
+    } finally { clock.mockRestore(); }
+  });
+
+  it('bounds renderer gaps and keeps deadline termination distinct from receipt', () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+    try {
+      const finish = syncMetrics.beginIpcAssertion();
+      for (const interval of [NaN, Infinity, 0, -1]) finish.startRenderer(interval);
+      expect(syncMetrics.snapshot().ipcAssertion![0].renderer).toBeUndefined();
+      finish.startRenderer(50);
+      for (let i = 1; i <= 20; i++) {
+        clock.mockReturnValue(100 + i * 200);
+        finish.observeRenderer('timer');
+      }
+      clock.mockReturnValue(4_150);
+      finish.observeRenderer('deadline');
+      const expired = syncMetrics.snapshot().ipcAssertion![0].renderer!;
+      expect(expired.gaps).toHaveLength(8);
+      expect(expired.timerTicks).toBe(20);
+      expect(expired.stopReason).toBe('deadline');
+      clock.mockReturnValue(10_000);
+      finish.observeRenderer('reply');
+      finish('connected');
+      expect(syncMetrics.snapshot().ipcAssertion![0].renderer).toEqual(expired);
+    } finally { clock.mockRestore(); }
+  });
+
   it.each([[NaN, 1], [100, Infinity], [-1, 1], [100, -1]])(
     'omits invalid native timing (%s, %s) instead of reporting zero work', (start, duration) => {
       const finish = syncMetrics.beginIpcAssertion();
