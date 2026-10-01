@@ -160,7 +160,7 @@ export interface SyncMetricsSnapshot {
   /** Last 64 attempts on the query clock; null phases distinguish import from invoke waits. */
   ipcAssertion?: Array<{ startedAtMs: number; importReadyAtMs: number | null;
     invokeStartedAtMs: number | null; invokeCompletedAtMs: number | null;
-    completedAtMs: number | null; client: string | null }>;
+    completedAtMs: number | null; client: string | null; error?: string }>;
   sse: {
     /** ms since the current connection opened, or null when disconnected. */
     connectedSinceMs: number | null;
@@ -450,10 +450,11 @@ export const syncMetrics = {
     };
     state.ipcAssertion.push(sample);
     if (state.ipcAssertion.length > 64) state.ipcAssertion.shift();
-    return Object.assign((client: string | null) => {
+    return Object.assign((client: string | null, error?: string) => {
       if (sample.completedAtMs !== null) return;
       sample.completedAtMs = now();
       sample.client = client;
+      if (error !== undefined) sample.error = error.slice(0, 500);
     }, {
       mark(stage: 'importReady' | 'invokeStarted' | 'invokeCompleted'): void {
         const key = `${stage}AtMs` as const;

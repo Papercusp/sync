@@ -68,6 +68,18 @@ describe('syncMetrics counters', () => {
     expect(sample.client).toBeNull();
   });
 
+  it('bounds IPC rejection reasons and preserves the first completed observation', () => {
+    const finish = syncMetrics.beginIpcAssertion();
+    finish(null, 'x'.repeat(700));
+    const saved = syncMetrics.snapshot().ipcAssertion![0];
+    expect(saved.error).toBe('x'.repeat(500));
+    saved.error = 'changed snapshot';
+    finish('connected', 'later completion');
+    expect(syncMetrics.snapshot().ipcAssertion![0]).toMatchObject({
+      client: null, error: 'x'.repeat(500),
+    });
+  });
+
   it('counts SSE events and bytes', () => {
     syncMetrics.sseEventReceived(100);
     syncMetrics.sseEventReceived(50);
