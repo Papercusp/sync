@@ -626,6 +626,76 @@ describe('invalidation-bus', () => {
     await bus.stop();
   });
 
+  // D-012 invariants for ONE source at every write cadence. The 10s override is
+  // a RATE bound (no two deliveries closer than the window) and a STALENESS bound
+  // (every write is reflected by a delivery at most one window later). A count at
+  // one cadence shows neither, and a live SSE capture cannot attribute events to
+  // a source (WI-10004929). The default-window target in the same bus is the
+  // calibration: it must meet its own 2s bounds yet VIOLATE the 10s gap, so the
+  // gap check is shown to detect a violation instead of passing vacuously.
+  it('a per-target coalesce override bounds delivery rate and write staleness for one source at every write cadence', async () => {
+    const WINDOW = 10_000;
+    const DEFAULT_WINDOW = 2_000;
+    const TICK = 50;
+    const START = 1000;
+    const RUN = 60_000;
+    for (const cadence of [50, 500, 1_300, 3_700, 9_950, 12_000]) {
+      const clock = { t: START };
+      const lb = makeLoopback();
+      const timers = makeTimerHarness();
+      const bus = createInvalidationBus({
+        listen: lb.listen,
+        notify: lb.notify,
+        now: () => clock.t,
+        dedupeWindowMs: 90_000,
+        setTimer: timers.setTimer,
+        clearTimer: timers.clearTimer,
+        bridge: (name) => (name === 'harness_shared.hot.changed' ? ['expensive.list', 'cheap.list'] : []),
+        bridgedCoalesceWindowMs: (queryName) => (queryName === 'expensive.list' ? WINDOW : undefined),
+      });
+      const delivered: Record<string, Array<{ at: number; ts: number }>> = { 'expensive.list': [], 'cheap.list': [] };
+      await bus.subscribe((e) => delivered[e.name]?.push({ at: clock.t, ts: e.ts }));
+      const writes: number[] = [];
+      // Tick on a fine grid independent of the write cadence. fireAll() runs every
+      // pending timer, so a delivery is only as precise as the tick spacing; every
+      // write and due time here lands on the 50ms grid, so delivery times are exact.
+      for (let t = START; t <= START + RUN + 2 * WINDOW; t += TICK) {
+        clock.t = t;
+        timers.fireAll();
+        if (t <= START + RUN && (t - START) % cadence === 0) {
+          writes.push(t);
+          lb.deliver(JSON.stringify({ name: 'harness_shared.hot.changed', args: { t } }));
+        }
+      }
+      const measure = (name: string) => {
+        const d = delivered[name];
+        const gaps = d.slice(1).map((x, i) => x.at - d[i].at);
+        // A write is reflected by the first delivery at or after it carrying its ts or later.
+        const staleness = writes.map((w) => {
+          const hit = d.find((x) => x.at >= w && x.ts >= w);
+          return hit ? hit.at - w : Number.POSITIVE_INFINITY;
+        });
+        return { minGap: gaps.length ? Math.min(...gaps) : Number.POSITIVE_INFINITY, maxStaleness: Math.max(...staleness) };
+      };
+      const expensive = measure('expensive.list');
+      const cheap = measure('cheap.list');
+      const label = `cadence ${cadence}ms`;
+
+      expect(expensive.minGap, label).toBeGreaterThanOrEqual(WINDOW);
+      expect(expensive.maxStaleness, label).toBeLessThanOrEqual(WINDOW);
+      // The override really holds writes past the default window: that delay is
+      // what buys the lower rate.
+      expect(expensive.maxStaleness, label).toBeGreaterThan(DEFAULT_WINDOW);
+
+      expect(cheap.minGap, label).toBeGreaterThanOrEqual(DEFAULT_WINDOW);
+      expect(cheap.maxStaleness, label).toBeLessThanOrEqual(DEFAULT_WINDOW);
+      if (cadence < WINDOW) expect(cheap.minGap, `${label} calibration`).toBeLessThan(WINDOW);
+
+      expect(timers.pending, label).toBe(0);
+      await bus.stop();
+    }
+  });
+
   it('clamps a per-target coalesce override to MAX_BRIDGE_COALESCE_WINDOW_MS and ignores non-finite values', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();
