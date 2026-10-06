@@ -77,7 +77,7 @@ describe('SyncProvider transport fallback keeps children mounted', () => {
     // Calibrates the probe: if this stops failing the lifecycle check, the
     // test above could pass vacuously.
     function SwappingProvider({ children }: { children: ReactNode }) {
-      const { activeTransport } = useTransportFallback({ preferred: 'SSE' });
+      const { activeTransport } = useTransportFallback({ preferred: 'SSE', fallbackDelayMs: 10_000 });
       return activeTransport === 'SSE'
         ? <SSEAdapter key="sse">{children}</SSEAdapter>
         : <PollingAdapter key="polling">{children}</PollingAdapter>;
