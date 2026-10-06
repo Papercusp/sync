@@ -557,6 +557,7 @@ export function useSyncVirtualizer<
 
     const firstItem = virtualItems[0];
     const lastItem = virtualItems[virtualItems.length - 1];
+    if (firstItem === undefined || lastItem === undefined) return;
     const nearPageEdgeThreshold = getNearPageEdgeThreshold(pageSize);
 
     const distanceFromStart = firstItem.index - firstRowIndex;

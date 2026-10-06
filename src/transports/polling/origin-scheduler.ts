@@ -500,8 +500,8 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
   const chooseNext = (): QueueEntry<unknown> | undefined => {
     for (const requestClass of CLASS_ORDER) {
       const queue = queues[requestClass];
-      if (queue.length === 0) continue;
       const first = queue[0];
+      if (first === undefined) continue;
       if (first.staleAfterMs !== null && now() - first.enqueuedAt >= first.staleAfterMs) {
         shedEntry(first);
         continue;

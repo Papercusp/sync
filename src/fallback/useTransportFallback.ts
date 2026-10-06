@@ -83,7 +83,7 @@ export function useTransportFallback(
             return current;
           }
 
-          const next = FALLBACK_ORDER[nextIndex];
+          const next = FALLBACK_ORDER[nextIndex] ?? current;
           console.warn(
             `[Sync] Transport ${current} failed — falling back to ${next}`,
             error.message,
