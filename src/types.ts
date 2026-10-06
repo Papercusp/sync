@@ -133,6 +133,12 @@ export interface SyncProviderProps {
    * calls are inert. Hosts with a deliberately narrow server endpoint use
    * this to stop mounted shared chrome from probing routes the endpoint does
    * not expose.
+   *
+   * An EMPTY list makes the provider inert: nothing dispatches AND no SSE
+   * invalidation stream opens (it would have nothing to refresh). Pass `[]`
+   * while the endpoint cannot serve the caller yet, e.g. a hosted principal
+   * with no selected workspace (WI-10006698). Pass a stable (module-level)
+   * array: a new array each render rebuilds the query hooks.
    */
   queryNameAllowlist?: readonly string[];
 }

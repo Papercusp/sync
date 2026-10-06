@@ -139,7 +139,14 @@ export function SyncProvider({
   // live Phone calls on every SSE blip (WI-10006696). Keep this tree identical
   // in both states.
   if (normalizedSyncType === 'SSE') {
-    const streaming = activeTransport === 'SSE';
+    // An EMPTY `queryNameAllowlist` means this provider may dispatch nothing,
+    // so an invalidation stream has nothing to refresh: do not open one. A
+    // host passes `[]` while its narrow endpoint cannot serve the caller yet
+    // (WI-10006698: a hosted principal with no selected workspace, which the
+    // boundary refuses with 403 — the refused stream also tripped the POLLING
+    // fallback). Same element tree either way, so children stay mounted.
+    const inert = queryNameAllowlist !== undefined && queryNameAllowlist.length === 0;
+    const streaming = activeTransport === 'SSE' && !inert;
     return (
       <Suspense
         fallback={<PendingSyncAdapter transport="SSE">{children}</PendingSyncAdapter>}
