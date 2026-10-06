@@ -105,6 +105,13 @@ import type { SyncType } from '../../types';
 
 interface SSEAdapterProps {
   children: ReactNode;
+  /**
+   * Whether the EventSource subscriber runs (default true). SyncProvider sets
+   * it false while on the POLLING fallback instead of swapping in a different
+   * adapter: the element tree above `children` must stay identical across a
+   * transport change, or React remounts the whole app (WI-10006696).
+   */
+  stream?: boolean;
   userId?: string;
   server?: string;
   restEndpoint?: string;
@@ -415,6 +422,7 @@ export const SSE_DRIFT_REPAIR_DEFAULT_MS = 180_000;
 
 export function SSEAdapter({
   children,
+  stream = true,
   restEndpoint,
   server,
   pollIntervalMs = SSE_DRIFT_REPAIR_DEFAULT_MS,
@@ -452,20 +460,22 @@ export function SSEAdapter({
   );
 
   const ctxValue = useMemo(
-    () => ({ transport: 'SSE' as SyncType, useDataImpl, prefetch }),
-    [useDataImpl, prefetch],
+    () => ({ transport: (stream ? 'SSE' : 'POLLING') as SyncType, useDataImpl, prefetch }),
+    [stream, useDataImpl, prefetch],
   );
 
   return (
     <QueryClientProvider client={queryClient}>
       <SyncContext.Provider value={ctxValue}>
-        <SSESubscriber
-          endpoint={endpoint}
-          onError={onTransportError}
-          tokenQueryParam={tokenQueryParam}
-          endpointOverride={endpointOverride}
-          visibilityPause={visibilityPause}
-        />
+        {stream ? (
+          <SSESubscriber
+            endpoint={endpoint}
+            onError={onTransportError}
+            tokenQueryParam={tokenQueryParam}
+            endpointOverride={endpointOverride}
+            visibilityPause={visibilityPause}
+          />
+        ) : null}
         {children}
       </SyncContext.Provider>
     </QueryClientProvider>

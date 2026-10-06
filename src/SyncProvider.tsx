@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { PollingAdapter } from './transports/polling/PollingAdapter';
+import { PollingAdapter, POLLING_DEFAULT_INTERVAL_MS } from './transports/polling/PollingAdapter';
 import { useTransportFallback } from './fallback/useTransportFallback';
 import { SSEAdapter } from './transports/sse/SSEAdapter';
 import { SyncContext } from './SyncContext';
@@ -132,21 +132,31 @@ export function SyncProvider({
   // it gets is `ssePollIntervalMs` (the LONG drift-repair tick, default 180s),
   // NOT `pollIntervalMs` — under SSE the tick is gap insurance, not the
   // freshness source (EI-278). Falls back to POLLING via useTransportFallback.
-  if (normalizedSyncType === 'SSE' && activeTransport === 'SSE') {
+  //
+  // The fallback (and the recovery retry back to SSE) only turns the adapter's
+  // event stream off and on; it never swaps the adapter. A different element
+  // above `children` makes React unmount and remount the WHOLE app, which ended
+  // live Phone calls on every SSE blip (WI-10006696). Keep this tree identical
+  // in both states.
+  if (normalizedSyncType === 'SSE') {
+    const streaming = activeTransport === 'SSE';
     return (
       <Suspense
         fallback={<PendingSyncAdapter transport="SSE">{children}</PendingSyncAdapter>}
       >
-        <SSEAdapter key="sse" {...commonProps} pollIntervalMs={ssePollIntervalMs}>
+        <SSEAdapter
+          key="sse"
+          {...commonProps}
+          stream={streaming}
+          pollIntervalMs={streaming ? ssePollIntervalMs : (pollIntervalMs ?? POLLING_DEFAULT_INTERVAL_MS)}
+        >
           {children}
         </SSEAdapter>
       </Suspense>
     );
   }
 
-  // POLLING — an explicit preference, or the SSE fallback. Stable key across the
-  // polling lifecycle so React preserves children state (scroll, filters) when
-  // fallback progresses SSE → POLLING.
+  // POLLING as an explicit preference (terminal: it never changes transport).
   return (
     <PollingAdapter key="polling" {...commonProps}>
       {children}

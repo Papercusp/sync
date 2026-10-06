@@ -41,11 +41,14 @@ function warnIfDefaultUsedInProd(endpoint: string): void {
   );
 }
 
+/** POLLING freshness cadence when the caller sets none (also the SSE fallback's). */
+export const POLLING_DEFAULT_INTERVAL_MS = 10_000;
+
 export function PollingAdapter({
   children,
   restEndpoint,
   server,
-  pollIntervalMs = 10_000,
+  pollIntervalMs = POLLING_DEFAULT_INTERVAL_MS,
   tokenQueryParam,
   maxInFlightFetches,
   persistExcludeQueryNames,
