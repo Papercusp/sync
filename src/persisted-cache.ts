@@ -6,12 +6,12 @@
  * while the normal staleTime/SSE-invalidate machinery revalidates in the
  * background.
  *
- * Hand-rolled on react-query's own `dehydrate`/`hydrate` instead of
- * `@tanstack/react-query-persist-client`: the QueryClient here is a lib
+ * Uses react-query's `dehydrate`/`hydrate` and the existing IndexedDB backend:
+ * the QueryClient here is a lib
  * singleton (SSEAdapter mounts its own `QueryClientProvider` around
  * `getQueryClient()` — there is no app-level provider to wrap in a
- * `PersistQueryClientProvider`), restore must be SYNCHRONOUS to beat the
- * first `useQuery` mount, and no new dependency is needed.
+ * `PersistQueryClientProvider`). Default restore is asynchronous and preserves
+ * newer live results; explicit Storage overrides can still restore synchronously.
  *
  * Opt-in: nothing here runs unless the HOST APP calls
  * `enablePersistedSyncCache()` at module-eval time (the same
