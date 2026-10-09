@@ -74,9 +74,23 @@ describe('persisted sync cache', () => {
     const restored = restorePersistedSyncCache({ client: target, storage });
     expect(restored).toBe(true);
     expect(target.getQueryData(['sync', 'work_items', {}])).toEqual(rows);
-    // dataUpdatedAt survives, so staleTime math (⇒ immediate background
-    // revalidate) works from the ORIGINAL fetch time, not the reload time.
+    // Preserve the original timestamp for observability, while restoration
+    // makes disk data stale even when that timestamp is only a second old.
     expect(target.getQueryState(['sync', 'work_items', {}])!.dataUpdatedAt).toBe(before);
+    expect(target.getQueryState(['sync', 'work_items', {}])!.isInvalidated).toBe(true);
+  });
+
+  it('does not invalidate a newer live result when restoring an older disk snapshot', () => {
+    const source = track(new QueryClient());
+    const target = track(new QueryClient());
+    const key = ['sync', 'goals.detail', { goalId: 'tea' }];
+    source.setQueryData(key, { rows: ['old'] }, { updatedAt: Date.now() - 1 });
+    target.setQueryData(key, { rows: ['new'] }, { updatedAt: Date.now() });
+    const storage = memoryStorage();
+    storage.setItem(KEY, JSON.stringify({ v: 1, buster: '', ts: Date.now(), state: dehydrate(source) }));
+    expect(restorePersistedSyncCache({ client: target, storage })).toBe(true);
+    expect(target.getQueryData(key)).toEqual({ rows: ['new'] });
+    expect(target.getQueryState(key)!.isInvalidated).toBe(false);
   });
 
   it('debounces: many cache events in one window produce one write', () => {

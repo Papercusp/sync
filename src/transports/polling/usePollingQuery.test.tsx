@@ -14,9 +14,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, dehydrate } from '@tanstack/react-query';
 import { createPrefetchSync, createUsePollingQuery } from './usePollingQuery';
 import { syncMetrics } from '../../observability/metrics';
+import { restorePersistedSyncCache } from '../../persisted-cache';
 
 // The fetchers Map is module-level — isolate tests via unique endpoints.
 let epCounter = 0;
@@ -47,6 +48,38 @@ afterEach(() => {
 });
 
 describe('usePollingQuery — queryKey stability (P-066)', () => {
+  it('revalidates a freshly persisted goal snapshot when a new document mounts', async () => {
+    const args = { workspaceId: 'reloaded-workspace', goalId: 'tea' };
+    const key = ['sync', 'goals.detail', args];
+    const source = new QueryClient();
+    const oldRows = [{ id: 'tea', order: ['mint', 'chamomile'], policyVersion: 0 }];
+    const savedRows = [{ id: 'tea', order: ['chamomile', 'mint'], policyVersion: 1 }];
+    source.setQueryData(key, { rows: oldRows, version: 'before-owner-save' });
+    const snapshot = JSON.stringify({ v: 1, buster: '', ts: Date.now(), state: dehydrate(source) });
+    const target = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 5_000 } } });
+    expect(restorePersistedSyncCache({ client: target, storage: {
+      getItem: () => snapshot, setItem: () => {}, removeItem: () => {},
+    } })).toBe(true);
+    // Preserve immediate paint, but do not trust the previous document's
+    // freshness timestamp after an owner write or lifecycle transition.
+    expect(target.getQueryData(key)).toEqual({ rows: oldRows, version: 'before-owner-save' });
+    const mockFetch = makeOkFetch({ rows: savedRows, version: 'after-owner-save' });
+    global.fetch = mockFetch as unknown as typeof fetch;
+    const usePollingQuery = createUsePollingQuery({ restEndpoint: ep(), defaultPollIntervalMs: 180_000 });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: target }, children);
+    const hook = renderHook(() => usePollingQuery({ queryName: 'goals.detail', args }), { wrapper });
+    try {
+      await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(hook.result.current.data).toEqual(savedRows));
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      hook.unmount();
+      source.clear();
+      target.clear();
+    }
+  });
+
   it('a fresh content-equal args object per render does not refetch', async () => {
     const mockFetch = makeOkFetch({ rows: [1], version: 'v1' });
     global.fetch = mockFetch as unknown as typeof fetch;

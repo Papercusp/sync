@@ -140,7 +140,17 @@ export function restorePersistedSyncCache(opts: PersistedSyncCacheOptions = {}):
       storage.removeItem(key);
       return false;
     }
-    hydrate(opts.client ?? getQueryClient(), env.state);
+    // A disk snapshot belongs to the previous document. Its timestamp may
+    // still fall inside staleTime even though an owner write or lifecycle
+    // change occurred after it was saved. Paint its data immediately, then
+    // revalidate on mount instead of waiting for the SSE drift-repair tick.
+    // Mark the incoming state only: hydrate still preserves newer live data.
+    hydrate(opts.client ?? getQueryClient(), {
+      ...env.state,
+      queries: env.state.queries.map((query) => query.queryKey[0] === 'sync'
+        ? { ...query, state: { ...query.state, isInvalidated: true } }
+        : query),
+    });
     return true;
   } catch {
     try {
