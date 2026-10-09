@@ -57,6 +57,22 @@ afterEach(() => {
 });
 
 describe('persisted sync cache', () => {
+  it('does not persist per-fetch transport timing or treat it as changed query content', () => {
+    const storage = memoryStorage();
+    const writes = vi.spyOn(storage, 'setItem');
+    const source = track(new QueryClient());
+    const key = ['sync', 'q', {}];
+    const stop = startSyncCachePersistence({ client: source, storage });
+    source.setQueryData(key, { rows: [1], version: 'v1', syncTiming: { traceId: 'first' } });
+    vi.advanceTimersByTime(1000);
+    source.setQueryData(key, { rows: [1], version: 'v1', syncTiming: { traceId: 'second' } });
+    vi.advanceTimersByTime(1000);
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(storage.map.get(KEY)!).state.queries[0].state.data).toEqual({ rows: [1], version: 'v1' });
+    expect(source.getQueryData(key)).toHaveProperty('syncTiming.traceId', 'second');
+    stop();
+  });
+
   it('round-trips: a flushed snapshot hydrates a fresh client with data + timestamps', () => {
     const storage = memoryStorage();
     const rows = { rows: [{ id: 'WI-1', title: 'first' }] };
