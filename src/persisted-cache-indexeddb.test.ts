@@ -11,6 +11,11 @@ const KEY = 'papercusp:sync-cache:v1';
 const QUERY = ['sync', 'accounts.pool', {}];
 const clients: QueryClient[] = [];
 const disposers: Array<() => void> = [];
+const browserStorage = {
+  getItem: vi.fn<Storage['getItem']>(() => null),
+  setItem: vi.fn<Storage['setItem']>(),
+  removeItem: vi.fn<Storage['removeItem']>(),
+};
 const client = () => {
   const value = new QueryClient();
   clients.push(value);
@@ -22,17 +27,20 @@ const backing = () => new IndexedDbKvPersistence<Snapshot>({
 
 beforeEach(() => {
   globalThis.indexedDB = new IDBFactory();
-  window.localStorage.clear();
+  // The test setup can expose Node's non-browser localStorage placeholder.
+  vi.stubGlobal('localStorage', browserStorage);
+  browserStorage.setItem.mockClear();
 });
 afterEach(() => {
   for (const dispose of disposers.splice(0)) dispose();
   for (const value of clients.splice(0)) value.clear();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('default IndexedDB sync-cache persistence', () => {
   it('persists changing data across reloads without touching the localStorage WAL', async () => {
-    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    const writes = browserStorage.setItem;
     const source = client();
     const stop = enablePersistedSyncCache({ client: source, debounceMs: 0 });
     disposers.push(stop);
@@ -91,7 +99,7 @@ describe('default IndexedDB sync-cache persistence', () => {
 
   it('unavailable IndexedDB keeps the app usable without falling back to localStorage', async () => {
     vi.stubGlobal('indexedDB', undefined);
-    const writes = vi.spyOn(Storage.prototype, 'setItem');
+    const writes = browserStorage.setItem;
     try {
       const source = client();
       const stop = enablePersistedSyncCache({ client: source, debounceMs: 0 });

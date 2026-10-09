@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@papercusp/debounce-coalesce": "*",
+    "@papercusp/kv-persist-indexeddb": "*",
     "@papercusp/module-singleton": "*",
     "@tanstack/react-query": "^5.75.0",
     "@tanstack/react-virtual": "^3.13.23",
@@ -40,6 +41,7 @@
     "react-dom": ">=19.0.0"
   },
   "devDependencies": {
-    "@papercusp/test-config": "*"
+    "@papercusp/test-config": "*",
+    "fake-indexeddb": "^6.2.5"
   }
 }

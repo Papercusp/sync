@@ -132,7 +132,7 @@ export {
   restorePersistedSyncCache,
   startSyncCachePersistence,
 } from './persisted-cache';
-export type { PersistedSyncCacheOptions, SyncCacheStorage } from './persisted-cache';
+export type { PersistedSyncCacheOptions, SyncCacheStorage, SyncCachePersistenceHandle } from './persisted-cache';
 
 // Rows-delta CLIENT seam (agent-tool-delta-client-rollout-2026-06-23 P-006) — the host
 // (operator) injects a codec backed by the tooldef DeltaToolClient; no codec = full, as today.

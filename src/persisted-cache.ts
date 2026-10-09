@@ -1,8 +1,8 @@
 /**
  * Persisted sync cache (WI-3318) — app-wide stale-while-revalidate across
  * reloads. Snapshots the sync QueryClient's successful queries to
- * `localStorage` (debounced, size-capped) and hydrates them back BEFORE the
- * first component mounts, so a reload paints every panel from disk instantly
+ * IndexedDB (debounced, size-capped) and hydrates them after its asynchronous
+ * read, so a reload paints panels from disk without rewriting WebKit localStorage
  * while the normal staleTime/SSE-invalidate machinery revalidates in the
  * background.
  *
@@ -25,6 +25,7 @@
  */
 import { dehydrate, hydrate, type QueryClient } from '@tanstack/react-query';
 import { getQueryClient } from './transports/polling/queryClient';
+import { createIndexedDbPersistence } from '@papercusp/kv-persist-indexeddb';
 
 /** Minimal storage seam (localStorage-shaped) so tests inject an in-memory one. */
 export type SyncCacheStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -79,7 +80,7 @@ export interface PersistedSyncCacheOptions {
   maxEntryBytes?: number;
   /** Debounce between cache-event and write. Default 1000ms. */
   debounceMs?: number;
-  /** Default `window.localStorage`. */
+  /** Explicit synchronous storage override. The default enable path uses IndexedDB. */
   storage?: SyncCacheStorage;
   /** Default: the sync transports' singleton (`getQueryClient()`). */
   client?: QueryClient;
@@ -106,6 +107,42 @@ const DEFAULT_DEBOUNCE_MS = 1000;
  * second while persisting nothing at all.
  */
 const MAX_CONSECUTIVE_FAILURES = 3;
+
+/** Callable disposer; ready settles when restore and the writer subscription are installed. */
+export type SyncCachePersistenceHandle = (() => void) & { ready: Promise<void> };
+
+async function indexedDbStorage(opts: PersistedSyncCacheOptions): Promise<SyncCacheStorage> {
+  // Reuse the maintained backend's short transactions and bounded batching.
+  // Do not fall back to localStorage: its logical quota does not bound WebKit's WAL.
+  const persistence = createIndexedDbPersistence<{ id: string; v: number; value: string }>({
+    dbName: 'papercusp-sync-cache',
+    storeName: 'snapshots',
+    maxAgeMs: opts.maxAgeMs ?? DEFAULT_MAX_AGE_MS,
+    writeDebounceMs: 0,
+  });
+  const values = new Map((await persistence.load()).map((row) => [row.id, row.value]));
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => {
+      values.set(key, value);
+      persistence.save([{ id: key, v: ENVELOPE_VERSION, value }]);
+    },
+    removeItem: (key) => {
+      values.delete(key);
+      // A tombstone removes this snapshot without clearing unrelated custom keys.
+      persistence.save([{ id: key, v: ENVELOPE_VERSION, value: '' }]);
+    },
+  };
+}
+
+function persistedQueryData(query: ReturnType<typeof dehydrate>['queries'][number]): unknown {
+  const data = query.state.data;
+  if (query.queryKey[0] !== 'sync' || !data || typeof data !== 'object' || Array.isArray(data)) return data;
+  // Transport timing describes the live fetch, never the restored rows. It changes
+  // on every refetch and previously defeated content dedup inside QueryState.data.
+  const { syncTiming: _timing, ...rest } = data as Record<string, unknown>;
+  return rest;
+}
 
 function resolveStorage(opts?: PersistedSyncCacheOptions): SyncCacheStorage | null {
   if (opts?.storage) return opts.storage;
@@ -201,7 +238,7 @@ export function syncCacheContentKey(
         meta: q.meta,
         status: s.status,
         error: s.error,
-        data: s.data,
+        data: persistedQueryData(q),
       };
     })
     .sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
@@ -323,7 +360,7 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
     if (sig === lastSignature) return; // nothing persistable changed — skip before serializing
     lastSignature = sig;
     try {
-      const state = dehydrate(client, {
+      const dehydrated = dehydrate(client, {
         shouldDehydrateQuery: (q) =>
           q.state.status === 'success' &&
           q.meta?.persist !== false &&
@@ -332,6 +369,12 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
           // appeared between the two walks, so persist it as before.
           sizeVerdicts.get(verdictKey(q.queryHash, q.state.dataUpdatedAt)) !== false,
       });
+      const state = {
+        ...dehydrated,
+        queries: dehydrated.queries.map((query) => ({
+          ...query, state: { ...query.state, data: persistedQueryData(query) },
+        })),
+      };
       // Stable comparison key: same shape as the envelope minus `ts` AND minus
       // each query's `dehydratedAt` (react-query stamps `dehydratedAt:
       // Date.now()` into EVERY dehydrated query on EVERY dehydrate() call —
@@ -391,6 +434,9 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
   };
 
   const unsubscribe = client.getQueryCache().subscribe(scheduleFlush);
+  // Asynchronous restore can finish after a live query has already landed.
+  // Schedule the current cache without synthesizing an event for other subscribers.
+  scheduleFlush();
   // Debounce leaves up to debounceMs of tail loss on navigation/close —
   // pagehide (the reliable unload signal, fires on tab close AND bfcache
   // entry) gets a final synchronous write.
@@ -407,20 +453,32 @@ export function startSyncCachePersistence(opts: PersistedSyncCacheOptions = {}):
   };
 }
 
-let activeDispose: (() => void) | null = null;
+let activeDispose: SyncCachePersistenceHandle | null = null;
 
 /**
- * Restore + start persistence in one call (idempotent — a second call is a
- * no-op returning the active dispose). The host app calls this once at
- * module-eval time, before any component mounts.
+ * Restore + start persistence in one call. Default restore is asynchronous;
+ * hydrate preserves newer live data arriving during the read. An explicit
+ * synchronous storage override retains synchronous startup for embedded callers.
  */
-export function enablePersistedSyncCache(opts: PersistedSyncCacheOptions = {}): () => void {
+export function enablePersistedSyncCache(opts: PersistedSyncCacheOptions = {}): SyncCachePersistenceHandle {
   if (activeDispose) return activeDispose;
-  restorePersistedSyncCache(opts);
-  const stop = startSyncCachePersistence(opts);
-  activeDispose = () => {
-    stop();
-    activeDispose = null;
+  let canceled = false;
+  let stop: (() => void) | undefined;
+  const dispose = Object.assign(() => {
+    canceled = true;
+    stop?.();
+    if (activeDispose === dispose) activeDispose = null;
+  }, { ready: Promise.resolve() });
+  activeDispose = dispose;
+  const install = (storage: SyncCacheStorage) => {
+    if (canceled) return;
+    const options = { ...opts, storage };
+    restorePersistedSyncCache(options);
+    stop = startSyncCachePersistence(options);
   };
-  return activeDispose;
+  if (opts.storage) install(opts.storage);
+  else dispose.ready = indexedDbStorage(opts).then(install).catch(() => {
+    // Optional cache initialization must never reject into the app boot path.
+  });
+  return dispose;
 }
