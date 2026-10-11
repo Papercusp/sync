@@ -121,13 +121,19 @@ export interface CreateInvalidationBusOptions {
   notify: NotifySink;
   /** Ring-buffer retention for reconnect replay. Default 60_000. */
   historyWindowMs?: number;
-  /** Suppress identical explicit notifies within this window. Default 90_000. */
+  /**
+   * Leading-edge floor for identical explicit notifies. The first publishes
+   * immediately; a PURE invalidate repeated inside the floor is held and
+   * published once on the trailing edge (see `bridgeCoalesceWindowMs`), never
+   * dropped. An identical DATA-bearing notify inside the floor is a duplicate
+   * and is dropped. Default 90_000.
+   */
   dedupeWindowMs?: number;
   /**
-   * Maximum age of a suppressed bridged event before the latest target is
-   * emitted on the trailing edge. The value is hard-capped at two seconds so
-   * a hot source can never leave the final write hidden behind the historical
-   * 90-second burst window. Default 2_000.
+   * Maximum age of a suppressed bridged event, or of a held explicit pure
+   * invalidate, before the latest one is emitted on the trailing edge. The
+   * value is hard-capped so a hot source can never leave the final write
+   * hidden behind the 90-second burst window. Default 2_000.
    */
   bridgeCoalesceWindowMs?: number;
   /** Serialized-payload byte cap; over → drop `data`. Default 32768. */
@@ -248,16 +254,29 @@ interface BridgeCandidate {
   args?: Record<string, unknown>;
 }
 
-interface BridgeWindow {
+/** A pure explicit invalidate held for its trailing publish: the serialized sink payload. */
+interface NotifyCandidate {
+  ts: number;
+  json: string;
+}
+
+/**
+ * Leading-edge/bounded-trailing coalescing state for one key. Used for bridged
+ * targets (keyed by source/target pair) and for explicit pure invalidates
+ * (keyed by name + args).
+ */
+interface CoalesceWindow<C> {
   /** Shared floor/coalesce state; pending is kept at length zero or one. */
-  floor: FloorState<BridgeCandidate>;
-  /** Effective source-side floor for this source/target pair. */
+  floor: FloorState<C>;
+  /** Effective source-side floor for this key. */
   dedupeWindowMs: number;
-  /** Effective trailing staleness bound for this source/target pair. */
+  /** Effective trailing staleness bound for this key. */
   coalesceWindowMs: number;
   /** A scheduled trailing flush, or null when there is no pending candidate. */
   timer: unknown | null;
 }
+
+type BridgeWindow = CoalesceWindow<BridgeCandidate>;
 
 /** Tiny non-crypto hash (FNV-1a, 32-bit) for the dedupe key's data leg.
  *  The key needs *equality* on the payload, not the payload bytes: storing
@@ -305,6 +324,14 @@ export function createInvalidationBus(
    * amplifier.
    */
   const bridgeWindows = new Map<string, BridgeWindow>();
+  /**
+   * Per-(name,args) state for explicit PURE invalidates. A repeat inside the
+   * dedupe floor is not dropped: it is held and published once on a trailing
+   * edge bounded by the coalesce window. Dropping it lost a real change: a
+   * page whose second write came within 90s of an identical first write never
+   * refreshed (WI-6554700010008519).
+   */
+  const notifyWindows = new Map<string, CoalesceWindow<NotifyCandidate>>();
   const inflightNotifies = new Set<Promise<unknown>>();
 
   let startPromise: Promise<void> | null = null;
@@ -364,20 +391,20 @@ export function createInvalidationBus(
     }
   }
 
-  function cancelBridgeTimer(entry: BridgeWindow): void {
+  function cancelWindowTimer(entry: { timer: unknown | null }): void {
     if (entry.timer === null) return;
     clearTimer(entry.timer);
     entry.timer = null;
   }
 
-  function scheduleBridgeFlush(key: string, entry: BridgeWindow, dueAt: number): void {
+  function scheduleWindowFlush(entry: { timer: unknown | null }, dueAt: number, flush: () => void): void {
     // Keep the timer anchored to the FIRST suppressed fire. Re-arming it from
     // every subsequent event would be a trailing debounce that can postpone a
     // sustained burst forever, which is exactly the stale-final-state failure
     // this coalescer is meant to remove.
-    cancelBridgeTimer(entry);
+    cancelWindowTimer(entry);
     const delayMs = Math.max(0, dueAt - now());
-    const handle = setTimer(() => flushBridge(key), delayMs);
+    const handle = setTimer(flush, delayMs);
     entry.timer = handle;
     // Node timers should not keep a host alive during shutdown. Browser timer
     // handles do not expose unref, so feature-detect it rather than narrowing
@@ -410,7 +437,7 @@ export function createInvalidationBus(
       fanout({ id: nextId++, name: latest.name, ts: latest.ts, ...(latest.args !== undefined ? { args: latest.args } : {}) });
       return;
     }
-    if (decision.dueAt !== null) scheduleBridgeFlush(key, entry, decision.dueAt);
+    if (decision.dueAt !== null) scheduleWindowFlush(entry, decision.dueAt, () => flushBridge(key));
   }
 
   function emitBridgedTarget(
@@ -454,26 +481,111 @@ export function createInvalidationBus(
     });
     entry.floor = decision.state;
     if (decision.wake) {
-      cancelBridgeTimer(entry);
+      cancelWindowTimer(entry);
       const latest = decision.coalesced.latest.payload;
       fanout({ id: nextId++, name: latest.name, ts: latest.ts, ...(latest.args !== undefined ? { args: latest.args } : {}) });
       return;
     }
-    if (decision.dueAt !== null) scheduleBridgeFlush(key, entry, decision.dueAt);
+    if (decision.dueAt !== null) scheduleWindowFlush(entry, decision.dueAt, () => flushBridge(key));
+  }
+
+  function pruneWindows<C>(windows: Map<string, CoalesceWindow<C>>, ts: number): void {
+    // A quiet key is retained only for its dedupe floor. The size guard keeps
+    // a write storm over many distinct keys from turning this map into an
+    // unbounded cache.
+    if (windows.size < 200) return;
+    for (const [key, entry] of windows) {
+      const last = entry.floor.lastWokenAt;
+      if (entry.floor.pending.length === 0 && last !== null && ts - last >= entry.dedupeWindowMs) {
+        cancelWindowTimer(entry);
+        windows.delete(key);
+      }
+    }
   }
 
   function pruneBridgeWindows(ts: number): void {
-    // A quiet source/target pair is retained only for its dedupe floor. The
-    // size guard keeps a write storm over many distinct targets from turning
-    // this diagnostic map into an unbounded cache.
-    if (bridgeWindows.size < 200) return;
-    for (const [key, entry] of bridgeWindows) {
-      const last = entry.floor.lastWokenAt;
-      if (entry.floor.pending.length === 0 && last !== null && ts - last >= entry.dedupeWindowMs) {
-        cancelBridgeTimer(entry);
-        bridgeWindows.delete(key);
-      }
+    pruneWindows(bridgeWindows, ts);
+  }
+
+  /** Publish one serialized payload to the sink, tracked so stop() can drain it. */
+  async function publishToSink(json: string): Promise<void> {
+    const publish = Promise.resolve(opts.notify.notify(json));
+    inflightNotifies.add(publish);
+    try {
+      await publish;
+    } catch (e) {
+      onError('notify', e);
+    } finally {
+      inflightNotifies.delete(publish);
     }
+  }
+
+  function notifyFloorCfg(entry: CoalesceWindow<NotifyCandidate>) {
+    return {
+      minSleepMs: entry.dedupeWindowMs,
+      maxStalenessMs: entry.coalesceWindowMs,
+      leadingEdge: true,
+    };
+  }
+
+  function flushNotify(key: string): void {
+    const entry = notifyWindows.get(key);
+    if (!entry) return;
+    entry.timer = null;
+    const pending = entry.floor.pending;
+    if (pending.length === 0) return;
+    const decision = decideWake({
+      lastWokenAt: entry.floor.lastWokenAt,
+      pending,
+      now: now(),
+      cfg: notifyFloorCfg(entry),
+    });
+    entry.floor = decision.state;
+    if (decision.wake) {
+      void publishToSink(decision.coalesced.latest.payload.json);
+      return;
+    }
+    if (decision.dueAt !== null) scheduleWindowFlush(entry, decision.dueAt, () => flushNotify(key));
+  }
+
+  /**
+   * Offer one pure invalidate to its key's window. Returns the payload to
+   * publish NOW (leading edge, or the floor has elapsed), or null when the
+   * candidate is held for one trailing publish within the coalesce window.
+   */
+  function offerNotify(key: string, candidate: NotifyCandidate, dedupeMs: number): string | null {
+    let entry = notifyWindows.get(key);
+    if (!entry) {
+      entry = {
+        floor: emptyFloorState<NotifyCandidate>(),
+        dedupeWindowMs: dedupeMs,
+        coalesceWindowMs: bridgeCoalesceWindowMs,
+        timer: null,
+      };
+      notifyWindows.set(key, entry);
+    } else {
+      entry.dedupeWindowMs = dedupeMs;
+    }
+    // Same trailing-latest shape as emitBridgedTarget: keep the first held
+    // fire's anchor so a sustained burst cannot postpone the trailing publish.
+    const previous = entry.floor.pending[0];
+    const pending: Fire<NotifyCandidate>[] = [
+      previous ? { at: previous.at, payload: candidate } : { at: candidate.ts, payload: candidate },
+    ];
+    const decision = decideWake({
+      lastWokenAt: entry.floor.lastWokenAt,
+      pending,
+      now: candidate.ts,
+      cfg: notifyFloorCfg(entry),
+    });
+    entry.floor = decision.state;
+    pruneWindows(notifyWindows, candidate.ts);
+    if (decision.wake) {
+      cancelWindowTimer(entry);
+      return decision.coalesced.latest.payload.json;
+    }
+    if (decision.dueAt !== null) scheduleWindowFlush(entry, decision.dueAt, () => flushNotify(key));
+    return null;
   }
 
   function onMessage(raw: string): void {
@@ -605,17 +717,19 @@ export function createInvalidationBus(
     // short window so each detected change gets through, while the window still collapses
     // a same-tick cross-process burst. (Clamped ≥0; falls back to the bus default.)
     const effDedupeMs = Math.max(0, notifyOpts?.dedupeWindowMs ?? dedupeWindowMs);
-    if (!shouldFanout(key, ts, effDedupeMs)) return;
 
-    const publish = Promise.resolve(opts.notify.notify(JSON.stringify(payload)));
-    inflightNotifies.add(publish);
-    try {
-      await publish;
-    } catch (e) {
-      onError('notify', e);
-    } finally {
-      inflightNotifies.delete(publish);
+    // A PURE invalidate says "re-read this query", and the state it points at
+    // can have changed since the last identical one. So a repeat inside the
+    // floor is held and published once on a trailing edge bounded by the
+    // coalesce window, never dropped. A data-bearing repeat with the same
+    // content hash is a byte-identical duplicate, so it is still dropped.
+    if (data === undefined) {
+      const leading = offerNotify(key, { ts, json: JSON.stringify(payload) }, effDedupeMs);
+      if (leading !== null) await publishToSink(leading);
+      return;
     }
+    if (!shouldFanout(key, ts, effDedupeMs)) return;
+    await publishToSink(JSON.stringify(payload));
   }
 
   /**
@@ -631,8 +745,16 @@ export function createInvalidationBus(
    */
   async function stop(): Promise<void> {
     subscribers.clear();
-    for (const entry of bridgeWindows.values()) cancelBridgeTimer(entry);
+    for (const entry of bridgeWindows.values()) cancelWindowTimer(entry);
     bridgeWindows.clear();
+    // A held trailing invalidate is an outbound notify like any other: publish
+    // it now rather than discard it, then drain it with the rest below.
+    for (const entry of notifyWindows.values()) {
+      cancelWindowTimer(entry);
+      const held = entry.floor.pending[0];
+      if (held) void publishToSink(held.payload.json);
+    }
+    notifyWindows.clear();
     if (inflightNotifies.size > 0) {
       await Promise.allSettled([...inflightNotifies]);
     }

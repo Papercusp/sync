@@ -83,7 +83,7 @@ describe('invalidation-bus', () => {
     await bus.subscribe(() => {});
 
     await bus.notifyInvalidate('plans.items', { harnessSlug: 'x' });
-    await bus.notifyInvalidate('plans.items', { harnessSlug: 'x' }); // dup, suppressed
+    await bus.notifyInvalidate('plans.items', { harnessSlug: 'x' }); // dup: held for the trailing edge, not published now
     expect(lb.delivered).toHaveLength(1);
 
     clock.t += 1001; // past the window
@@ -113,6 +113,117 @@ describe('invalidation-bus', () => {
     clock.t += 2_000; // now 6s since the first — past the 5s override (but FAR inside the 90s default)
     await bus.notifyInvalidate('harness_shared.user_actions.changed', undefined, undefined, { dedupeWindowMs: 5_000 });
     expect(lb.delivered).toHaveLength(2); // override won — the 90s default would have suppressed this
+  });
+
+  it('a pure invalidate repeated inside the floor is published once on a bounded trailing edge, not dropped (WI-6554700010008519)', async () => {
+    // The P-005 failure: a credential save and a pack save both invalidated
+    // integrations.tickets for the same user ~30-60s apart. The second was
+    // dropped by the 90s floor, so the page never re-read the saved pack.
+    const clock = { t: 1000 };
+    const timers = makeTimerHarness();
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    await bus.subscribe(() => {});
+
+    await bus.notifyInvalidate('integrations.tickets', { userId: 'u1' });
+    expect(lb.delivered).toHaveLength(1); // leading edge: immediate
+
+    clock.t += 30_000; // a second, real write well inside the 90s floor
+    await bus.notifyInvalidate('integrations.tickets', { userId: 'u1' });
+    expect(lb.delivered).toHaveLength(1); // held, not published yet
+    expect(timers.pending).toBe(1); // ...but a trailing publish is scheduled
+
+    clock.t += 2_000; // the coalesce window elapses
+    timers.fireAll();
+    expect(lb.delivered).toHaveLength(2);
+    expect(JSON.parse(lb.delivered[1]!)).toEqual({ name: 'integrations.tickets', args: { userId: 'u1' } });
+    expect(timers.pending).toBe(0);
+  });
+
+  it('a burst of repeats inside the floor yields exactly ONE trailing publish, anchored to the first held repeat', async () => {
+    const clock = { t: 1000 };
+    const timers = makeTimerHarness();
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    await bus.subscribe(() => {});
+
+    await bus.notifyInvalidate('plans.items', { harnessSlug: 'x' });
+    for (let i = 0; i < 5; i++) {
+      clock.t += 300; // five repeats spread over 1.5s, all inside the 2s window
+      await bus.notifyInvalidate('plans.items', { harnessSlug: 'x' });
+    }
+    expect(lb.delivered).toHaveLength(1);
+    expect(timers.pending).toBe(1);
+
+    // Due 2s after the FIRST held repeat (t=1300 -> 3300), not after the last.
+    clock.t = 3300;
+    timers.fireAll();
+    expect(lb.delivered).toHaveLength(2);
+    timers.fireAll(); // nothing re-armed
+    expect(lb.delivered).toHaveLength(2);
+
+    // Other keys are independent: a different args key publishes immediately.
+    await bus.notifyInvalidate('plans.items', { harnessSlug: 'y' });
+    expect(lb.delivered).toHaveLength(3);
+  });
+
+  it('an identical DATA-bearing repeat inside the floor is still dropped, with no trailing publish', async () => {
+    const clock = { t: 1000 };
+    const timers = makeTimerHarness();
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    await bus.subscribe(() => {});
+
+    await bus.notifyInvalidate('rows', { k: 1 }, [{ id: 1 }]);
+    clock.t += 500;
+    await bus.notifyInvalidate('rows', { k: 1 }, [{ id: 1 }]); // byte-identical update
+    expect(lb.delivered).toHaveLength(1);
+    expect(timers.pending).toBe(0);
+  });
+
+  it('stop() publishes a held trailing invalidate instead of discarding it', async () => {
+    const clock = { t: 1000 };
+    const timers = makeTimerHarness();
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      dedupeWindowMs: 90_000,
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+    });
+    await bus.subscribe(() => {});
+
+    await bus.notifyInvalidate('integrations.tickets', { userId: 'u1' });
+    clock.t += 1_000;
+    await bus.notifyInvalidate('integrations.tickets', { userId: 'u1' }); // held
+    expect(lb.delivered).toHaveLength(1);
+
+    await bus.stop();
+    expect(lb.delivered).toHaveLength(2);
+    expect(timers.pending).toBe(0);
   });
 
   it('different args are not deduped against each other', async () => {
