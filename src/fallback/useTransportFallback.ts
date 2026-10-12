@@ -172,5 +172,5 @@ export function useTransportFallback(
     };
   }, []);
 
-  return { activeTransport, onTransportError };
+  return { activeTransport, onTransportError, onTransportHealthChange };
 }
