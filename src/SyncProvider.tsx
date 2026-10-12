@@ -84,6 +84,7 @@ export function SyncProvider({
   fallbackDelayMs = 10_000,
   recoveryDelayMs,
   recoveryMaxDelayMs,
+  observeFallback,
   tokenQueryParam,
   endpointOverride,
   visibilityPause,
@@ -92,11 +93,12 @@ export function SyncProvider({
   queryNameAllowlist,
 }: SyncProviderProps) {
   const normalizedSyncType = normalizeSyncType(syncType);
-  const { activeTransport, onTransportError } = useTransportFallback({
+  const { activeTransport, onTransportError, onTransportHealthChange } = useTransportFallback({
     preferred: normalizedSyncType,
     fallbackDelayMs,
     recoveryDelayMs,
     recoveryMaxDelayMs,
+    observeFallback,
   });
 
   // SSR/CSR parity: defer mounting the real adapter until after the first
@@ -155,6 +157,7 @@ export function SyncProvider({
           key="sse"
           {...commonProps}
           stream={streaming}
+          onTransportHealthChange={onTransportHealthChange}
           pollIntervalMs={streaming ? ssePollIntervalMs : (pollIntervalMs ?? POLLING_DEFAULT_INTERVAL_MS)}
         >
           {children}

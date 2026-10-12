@@ -4,6 +4,15 @@
  */
 export type SyncType = 'WEBSOCKETS' | 'SSE' | 'POLLING';
 
+/** Redacted transport decisions; the host supplies its local durable sink. */
+export interface SyncTransportDecision {
+  eligible: 1;
+  applied: 0 | 1;
+  reason: 'preferred-unavailable' | 'applied';
+  scope: Exclude<SyncType, 'POLLING'>;
+}
+export type SyncFallbackObserver = (mechanism: 'browser-sync-transport', decision: SyncTransportDecision) => void;
+
 export interface SyncProviderProps {
   /**
    * Preferred transport. `WEBSOCKETS` is accepted for source compatibility,
@@ -36,6 +45,8 @@ export interface SyncProviderProps {
   ssePollIntervalMs?: number;
   /** Milliseconds of sustained SSE failure before fallback. Default: 10_000 (10s). */
   fallbackDelayMs?: number;
+  /** Local diagnostics only; never receives errors, URLs or user identifiers. */
+  observeFallback?: SyncFallbackObserver;
   /**
    * After falling back, wait this long before retrying the preferred
    * transport (doubles per failed retry, capped at recoveryMaxDelayMs;

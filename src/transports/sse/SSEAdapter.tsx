@@ -125,6 +125,7 @@ interface SSEAdapterProps {
    */
   pollIntervalMs?: number;
   onTransportError?: (error: Error) => void;
+  onTransportHealthChange?: (healthy: boolean) => void;
   /** ?token=<value> appended to the SSE URL. EventSource can't carry headers. */
   tokenQueryParam?: string;
   /** Override the SSE endpoint path. Default: `${restEndpoint}/sse`. */
@@ -156,12 +157,14 @@ interface UpdateEvent {
 function SSESubscriber({
   endpoint,
   onError,
+  onTransportHealthChange,
   tokenQueryParam,
   endpointOverride,
   visibilityPause,
 }: {
   endpoint: string;
   onError?: (e: Error) => void;
+  onTransportHealthChange?: (healthy: boolean) => void;
   tokenQueryParam?: string;
   endpointOverride?: string;
   visibilityPause?: boolean;
@@ -377,11 +380,13 @@ function SSESubscriber({
         update:     (data) => handlePayload(data, 'update'),
       },
       onOpen: () => {
+        onTransportHealthChange?.(true);
         syncMetrics.sseConnected();
         // The stream opened — the origin is reachable (EI-239 offline store).
         reportSyncReachable();
       },
       onStatusChange: (s) => {
+        if (s === 'failing' || s === 'closed' || s === 'idle') onTransportHealthChange?.(false);
         if (s === 'connecting' && !firstConnect) syncMetrics.sseReconnectAttempt();
         if (s === 'failing' || s === 'closed') syncMetrics.sseDisconnected();
         // Reconnects failing = network-level unreachability candidate. A
@@ -399,6 +404,7 @@ function SSESubscriber({
     });
 
     return () => {
+      onTransportHealthChange?.(false);
       syncMetrics.sseDisconnected();
       unsubscribeCache();
       interest.close();
@@ -406,7 +412,7 @@ function SSESubscriber({
       controlStream?.release();
       controlStream = null;
     };
-  }, [endpoint, queryClient, onError, tokenQueryParam, endpointOverride, visibilityPause]);
+  }, [endpoint, queryClient, onError, onTransportHealthChange, tokenQueryParam, endpointOverride, visibilityPause]);
 
   return null;
 }
@@ -427,6 +433,7 @@ export function SSEAdapter({
   server,
   pollIntervalMs = SSE_DRIFT_REPAIR_DEFAULT_MS,
   onTransportError,
+  onTransportHealthChange,
   tokenQueryParam,
   endpointOverride,
   visibilityPause,
@@ -471,6 +478,7 @@ export function SSEAdapter({
           <SSESubscriber
             endpoint={endpoint}
             onError={onTransportError}
+            onTransportHealthChange={onTransportHealthChange}
             tokenQueryParam={tokenQueryParam}
             endpointOverride={endpointOverride}
             visibilityPause={visibilityPause}
