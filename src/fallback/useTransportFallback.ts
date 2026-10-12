@@ -99,29 +99,29 @@ export function useTransportFallback(
       fallbackTimer.current = setTimeout(() => {
         fallbackTimer.current = null;
         const current = activeRef.current;
-          const currentIndex = FALLBACK_ORDER.indexOf(current);
-          const nextIndex = currentIndex + 1;
+        const currentIndex = FALLBACK_ORDER.indexOf(current);
+        const nextIndex = currentIndex + 1;
 
-          if (nextIndex >= FALLBACK_ORDER.length) {
-            // Already at terminal fallback (POLLING) — nothing to do
-            console.warn('[Sync] Already at terminal transport (POLLING)');
-            return;
-          }
+        if (nextIndex >= FALLBACK_ORDER.length) {
+          // Already at terminal fallback (POLLING) — nothing to do
+          console.warn('[Sync] Already at terminal transport (POLLING)');
+          return;
+        }
 
-          const next = FALLBACK_ORDER[nextIndex] ?? current;
-          // Outside React's state updater: StrictMode may evaluate that updater
-          // twice, but this is one measured fallback decision.
-          if (preferred !== 'POLLING') {
-            try {
-              observeFallback?.('browser-sync-transport', { eligible: 1, applied: 0, reason: 'preferred-unavailable', scope: preferred });
-            } catch { /* diagnostics cannot change transport behavior */ }
-          }
-          console.warn(
-            `[Sync] Transport ${current} failed — falling back to ${next}`,
-            error.message,
-          );
-          activeRef.current = next;
-          setActiveTransport(next);
+        const next = FALLBACK_ORDER[nextIndex] ?? current;
+        // Outside React's state updater: StrictMode may evaluate that updater
+        // twice, but this is one measured fallback decision.
+        if (preferred !== 'POLLING') {
+          try {
+            observeFallback?.('browser-sync-transport', { eligible: 1, applied: 0, reason: 'preferred-unavailable', scope: preferred });
+          } catch { /* diagnostics cannot change transport behavior */ }
+        }
+        console.warn(
+          `[Sync] Transport ${current} failed — falling back to ${next}`,
+          error.message,
+        );
+        activeRef.current = next;
+        setActiveTransport(next);
       }, fallbackDelayMs);
     },
     [fallbackDelayMs, preferred, observeFallback],

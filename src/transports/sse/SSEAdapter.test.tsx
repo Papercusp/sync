@@ -135,6 +135,30 @@ describe('control stream yields under per-origin contention (WI-2141694)', () =>
     expect(opts.yieldOnContention).toBe(true);
   });
 
+  it('reports actual opens, pauses and cleanup to the fallback observer through SyncProvider', async () => {
+    const { SyncProvider } = await import('../../SyncProvider');
+    const observed = vi.fn();
+    vi.useFakeTimers();
+    try {
+      const view = render(<SyncProvider observeFallback={observed} recoveryDelayMs={30000}>{null}</SyncProvider>);
+      const opts = controlStreamOpts[0]!;
+      expect(opts).toBeDefined();
+      const open = opts.onOpen as () => void;
+      const status = opts.onStatusChange as (status: string) => void;
+      open();
+      vi.advanceTimersByTime(30000);
+      expect(observed).toHaveBeenCalledWith('browser-sync-transport', {
+        eligible: 1, applied: 1, reason: 'applied', scope: 'SSE',
+      });
+      open(); status('idle');
+      vi.advanceTimersByTime(30000);
+      expect(observed).toHaveBeenCalledTimes(1);
+      open(); view.unmount();
+      vi.advanceTimersByTime(30000);
+      expect(observed).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('leaves priority at the default so the OLDEST stream yields first', () => {
     render(<SSEAdapter>{null}</SSEAdapter>);
 
