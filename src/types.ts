@@ -2,6 +2,8 @@
  * Supported live transports are SSE and POLLING. `WEBSOCKETS` is retained as
  * a legacy compatibility input and is normalized to SSE by `SyncProvider`.
  */
+import type { OriginSchedulerClass } from './transports/polling/origin-scheduler';
+
 export type SyncType = 'WEBSOCKETS' | 'SSE' | 'POLLING';
 
 /** Redacted transport decisions; the host supplies its local durable sink. */
@@ -195,17 +197,13 @@ export interface SyncQueryOptions {
    * includes, never the live in-memory cache or refetch behavior.
    */
   persist?: boolean;
-  /*
-   * NOTE — `priority: 'interactive' | 'background'` used to live here (WI-5851)
-   * and was REMOVED on 2026-07-26 with the batcher it existed to steer
-   * (drop-sync-batcher-2026-07-25 P-005). It bought a click its own batch so it
-   * would not inherit a poll wave's latency through an indivisible bundle. With
-   * one request per query there is no bundle to be trapped in: every query is
-   * already independently dispatched and independently returned, so the lane
-   * split is not just unnecessary, it is unrepresentable. Nothing replaces it —
-   * do not reintroduce a hand-labelled priority; the label rotted (only queries
-   * someone remembered to tag were fast) and that rot is why it is gone.
+  /**
+   * Admission class in the shared origin scheduler. Defaults to foreground-read.
+   * A read directly requested by a selection can use interactive-control so it
+   * does not queue behind the page's startup reads. This changes admission,
+   * never the query's cache key, timeout or transport concurrency limit.
    */
+  requestClass?: OriginSchedulerClass;
 }
 
 export interface SyncQueryResult<T = any> {

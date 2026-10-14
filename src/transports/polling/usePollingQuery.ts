@@ -80,7 +80,7 @@ export function createUsePollingQuery(config: PollingConfig) {
     : null;
 
   return function usePollingQuery<T = any>(opts: SyncQueryOptions): SyncQueryResult<T> {
-    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime, persist } = opts;
+    const { queryName, args = {}, pollIntervalMs, enabled = true, staleTime, persist, requestClass } = opts;
     const queryAllowed = queryNameAllowSet === null || queryNameAllowSet.has(queryName);
     const effectiveEnabled = enabled && queryAllowed;
     const interval = pollIntervalMs ?? config.defaultPollIntervalMs;
@@ -103,9 +103,9 @@ export function createUsePollingQuery(config: PollingConfig) {
     const queryFn = useCallback(
       ({ signal }: { signal: AbortSignal }) => {
         syncMetrics.cacheMiss();
-        return fetchQuery(queryName, JSON.parse(argsKey), { signal });
+        return fetchQuery(queryName, JSON.parse(argsKey), { signal, requestClass });
       },
-      [queryName, argsKey],
+      [queryName, argsKey, requestClass],
     );
 
     const { data, isLoading, isFetching, isPlaceholderData, error, refetch, failureCount, failureReason } = useQuery({

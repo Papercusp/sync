@@ -495,9 +495,9 @@ export function getQueryFetcher(
     // stall that was never in it. `meta.sentAtMs` is exactly the discriminator
     // (null ⇒ sendOne never ran ⇒ never admitted), and the metrics path below
     // already splits waitMs/requestMs on it; only this message did not. Say
-    // which deadline actually elapsed, and — when the slot WAS granted — how
-    // long each half took, so the next reader is pointed at the transport
-    // rather than at a gate that had capacity to spare the whole time.
+    // which deadline elapsed and how long each half took. Admission alone
+    // cannot rule out queue delay: a late slot can leave too little time for a
+    // healthy response under this total deadline (WI-6554700010011539).
     const expiry = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         expired = true;
@@ -509,8 +509,7 @@ export function getQueryFetcher(
               ? `sync query "${name}" timed out after ${requestTimeoutMs}ms waiting for a request slot`
               : `sync query "${name}" timed out after ${requestTimeoutMs}ms in flight ` +
                 `(got a slot after ${Math.round(admittedAtMs - startedAtMs)}ms, then ` +
-                `${Math.round(nowMs() - admittedAtMs)}ms awaiting the response — the gate ` +
-                `was not the bottleneck)`,
+                `${Math.round(nowMs() - admittedAtMs)}ms awaiting the response)`,
           ),
         );
       }, requestTimeoutMs);
@@ -573,8 +572,7 @@ export function getQueryFetcher(
             ? `sync query "${name}" timed out after ${requestTimeoutMs}ms waiting for a request slot`
             : `sync query "${name}" timed out after ${requestTimeoutMs}ms in flight ` +
               `(got a slot after ${Math.round(admittedAtMs - startedAtMs)}ms, then ` +
-              `${Math.round(nowMs() - admittedAtMs)}ms awaiting the response — the gate ` +
-              `was not the bottleneck)`,
+              `${Math.round(nowMs() - admittedAtMs)}ms awaiting the response)`,
         );
       }
       throw e;
