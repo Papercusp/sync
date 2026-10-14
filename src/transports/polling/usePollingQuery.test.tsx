@@ -18,6 +18,7 @@ import { QueryClient, QueryClientProvider, dehydrate } from '@tanstack/react-que
 import { createPrefetchSync, createUsePollingQuery } from './usePollingQuery';
 import { syncMetrics } from '../../observability/metrics';
 import { restorePersistedSyncCache } from '../../persisted-cache';
+import { getQueryFetcher } from './query-fetcher';
 
 // The fetchers Map is module-level — isolate tests via unique endpoints.
 let epCounter = 0;
@@ -48,6 +49,34 @@ afterEach(() => {
 });
 
 describe('usePollingQuery — queryKey stability (P-066)', () => {
+  it('admits a selected interactive detail ahead of queued startup reads', async () => {
+    const endpoint = ep();
+    const releases: Array<() => void> = [];
+    const names: string[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const name = new URL(url).searchParams.get('name')!;
+      names.push(name);
+      if (name.startsWith('startup.')) await new Promise<void>((resolve) => releases.push(resolve));
+      return { ok: true, text: async () => JSON.stringify({ rows: [name], version: 'v' }) };
+    });
+    const fetcher = getQueryFetcher(endpoint, undefined, 1);
+    const holder = fetcher('startup.holder', {});
+    await waitFor(() => expect(names).toEqual(['startup.holder']));
+    const queued = fetcher('startup.queued', {});
+    const usePollingQuery = createUsePollingQuery({ restEndpoint: endpoint, defaultPollIntervalMs: 60_000, maxInFlightFetches: 1 });
+    const hook = renderHook(() => usePollingQuery({ queryName: 'selected.detail', requestClass: 'interactive-control' }), { wrapper: makeWrapper() });
+    try {
+      releases.shift()!();
+      await holder;
+      await waitFor(() => expect(names[1]).toBe('selected.detail'));
+      await waitFor(() => expect(hook.result.current.data).toEqual(['selected.detail']));
+    } finally {
+      hook.unmount();
+      releases.splice(0).forEach((release) => release());
+      await queued;
+    }
+  });
+
   it('revalidates a freshly persisted goal snapshot when a new document mounts', async () => {
     const args = { workspaceId: 'reloaded-workspace', goalId: 'tea' };
     const key = ['sync', 'goals.detail', args];

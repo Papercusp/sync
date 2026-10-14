@@ -564,7 +564,37 @@ describe('getQueryFetcher — per-request deadline (WI-6559)', () => {
     expect(message).not.toMatch(/waiting for a request slot/);
     // And it must say so in terms that redirect the reader off the gate.
     expect(message).toMatch(/in flight/);
-    expect(message).toMatch(/gate was not the bottleneck/);
+    expect(message).toMatch(/got a slot after/);
+    expect(message).not.toMatch(/bottleneck/);
+  });
+
+  it('reports late admission without ruling out the queue as the cause of total expiry', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+    const release = deferred();
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url: string) => {
+      if (new URL(url).searchParams.get('name') === 'startup') {
+        await release.promise;
+        return okResponse({ rows: [], version: 'v' });
+      }
+      return hangsIgnoringAbort();
+    }));
+    try {
+      const fetcher = getQueryFetcher(ep(), undefined, 1, 1000);
+      const holder = fetcher('startup', {});
+      const result = Promise.allSettled([fetcher('selected.detail', {})]);
+      await vi.advanceTimersByTimeAsync(800);
+      release.resolve();
+      await holder;
+      await vi.advanceTimersByTimeAsync(200);
+      const [settled] = await result;
+      expect(settled.status).toBe('rejected');
+      const message = String((settled as PromiseRejectedResult).reason.message);
+      expect(message).toContain('got a slot after 800ms');
+      expect(message).toContain('200ms awaiting the response');
+      expect(message).not.toMatch(/gate was not the bottleneck/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not fire on a request that completes inside the deadline', async () => {
