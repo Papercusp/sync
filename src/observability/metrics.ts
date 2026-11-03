@@ -15,6 +15,7 @@
  */
 
 import type { OriginSchedulerSnapshot } from '../transports/polling/origin-scheduler';
+import { hashKey } from '@tanstack/react-query';
 
 /** One completed (or failed) query request, as kept in the bounded recent-ring. */
 export interface SyncQueryEvent {
@@ -32,6 +33,8 @@ export interface SyncQueryEvent {
   outcome: SyncQueryOutcome;
   /** Correlates the request with the later React commit/frame stages. */
   traceId?: string;
+  /** SSE invalidation event ids that matched this query key before the fetch. */
+  invalidationTraceIds?: string[];
   /** Stage timings captured by the writers on this request. Every duration is ms. */
   stages?: SyncStageTimings;
 }
@@ -78,6 +81,8 @@ export interface SyncStageSample {
   measuredAtMs: number;
   queryName?: string;
   traceId?: string;
+  /** Active cached query keys matched by this SSE event at receipt time. */
+  matchedQueryCount?: number;
 }
 
 export interface SyncStageStat {
@@ -297,6 +302,26 @@ const state: MetricsState = {
 };
 
 const STAGE_RING_SIZE = 400;
+const SSE_INVALIDATION_TRACE_TTL_MS = 30_000;
+const MAX_PENDING_SSE_INVALIDATION_KEYS = 400;
+const MAX_SSE_INVALIDATION_TRACES_PER_KEY = 8;
+
+interface PendingSseInvalidationTrace {
+  traces: Array<{ traceId: string; expiresAtMs: number }>;
+}
+
+const pendingSseInvalidationTraces = new Map<string, PendingSseInvalidationTrace>();
+
+function pendingInvalidationKey(queryName: string, args: unknown): string {
+  return hashKey(['sync', queryName, args ?? {}]);
+}
+
+function prunePendingSseInvalidationTraces(nowMs: number): void {
+  for (const [key, pending] of pendingSseInvalidationTraces) {
+    pending.traces = pending.traces.filter((trace) => trace.expiresAtMs > nowMs);
+    if (pending.traces.length === 0) pendingSseInvalidationTraces.delete(key);
+  }
+}
 
 function freshStageStat(): SyncStageStat {
   return {
@@ -330,7 +355,7 @@ export function createSyncTraceId(prefix = 'sync'): string {
 function recordStageSample(
   stage: SyncStageName,
   durationMs: number,
-  meta: { queryName?: string; traceId?: string; measuredAtMs?: number } = {},
+  meta: { queryName?: string; traceId?: string; measuredAtMs?: number; matchedQueryCount?: number } = {},
 ): void {
   if (!SYNC_STAGE_NAMES.includes(stage) || !Number.isFinite(durationMs) || durationMs < 0) {
     state.stages.invalidSamples++;
@@ -342,6 +367,7 @@ function recordStageSample(
     return;
   }
   const stat = state.stages.byStage.get(stage) ?? freshStageStat();
+  const matchedQueryCount = meta.matchedQueryCount;
   stat.count++;
   stat.durationMsTotal += durationMs;
   stat.durationMsMax = Math.max(stat.durationMsMax, durationMs);
@@ -354,6 +380,9 @@ function recordStageSample(
     measuredAtMs,
     ...(meta.queryName ? { queryName: meta.queryName } : {}),
     ...(meta.traceId ? { traceId: meta.traceId } : {}),
+    ...(typeof matchedQueryCount === 'number' && Number.isInteger(matchedQueryCount) && matchedQueryCount >= 0
+      ? { matchedQueryCount }
+      : {}),
   });
   if (state.stages.recent.length > STAGE_RING_SIZE) state.stages.recent.shift();
 }
@@ -372,7 +401,7 @@ export const syncMetrics = {
   sseEventReceived(
     byteLen: number,
     serverEmittedAtMs?: number,
-    meta?: { queryName?: string; traceId?: string; receivedAtMs?: number },
+    meta?: { queryName?: string; traceId?: string; receivedAtMs?: number; matchedQueryCount?: number },
   ): void {
     state.sse.eventsReceived++;
     state.sse.bytesReceived += byteLen;
@@ -391,6 +420,7 @@ export const syncMetrics = {
       recordStageSample('eventReceipt', state.sse.lastEventLatencyMs, {
         queryName: meta?.queryName,
         traceId: meta?.traceId,
+        matchedQueryCount: meta?.matchedQueryCount,
         measuredAtMs: receivedAtMs,
       });
     }
@@ -413,6 +443,37 @@ export const syncMetrics = {
     if (name) {
       state.invalidationsBySseName.set(name, (state.invalidationsBySseName.get(name) ?? 0) + 1);
     }
+  },
+  /** Retain a short-lived link from one matched active query key to an SSE invalidation. */
+  recordSseInvalidationTrace(queryName: string, args: unknown, traceId: string): void {
+    if (!queryName || !traceId) return;
+    const nowMs = Date.now();
+    prunePendingSseInvalidationTraces(nowMs);
+    const key = pendingInvalidationKey(queryName, args);
+    let pending = pendingSseInvalidationTraces.get(key);
+    if (!pending) {
+      if (pendingSseInvalidationTraces.size >= MAX_PENDING_SSE_INVALIDATION_KEYS) {
+        const oldestKey = pendingSseInvalidationTraces.keys().next().value;
+        if (oldestKey !== undefined) pendingSseInvalidationTraces.delete(oldestKey);
+      }
+      pending = { traces: [] };
+    }
+    if (!pending.traces.some((trace) => trace.traceId === traceId)) {
+      pending.traces.push({ traceId, expiresAtMs: nowMs + SSE_INVALIDATION_TRACE_TTL_MS });
+      if (pending.traces.length > MAX_SSE_INVALIDATION_TRACES_PER_KEY) pending.traces.shift();
+    }
+    pendingSseInvalidationTraces.delete(key);
+    pendingSseInvalidationTraces.set(key, pending);
+  },
+  /** Consume, once, the live SSE invalidations associated with this query key. */
+  consumeSseInvalidationTraceIds(queryName: string, args: unknown): string[] {
+    const nowMs = Date.now();
+    prunePendingSseInvalidationTraces(nowMs);
+    const key = pendingInvalidationKey(queryName, args);
+    const pending = pendingSseInvalidationTraces.get(key);
+    if (!pending) return [];
+    pendingSseInvalidationTraces.delete(key);
+    return pending.traces.map((trace) => trace.traceId);
   },
   invalidateFromTimer(): void {
     state.invalidations.fromTimer++;
@@ -512,7 +573,7 @@ export const syncMetrics = {
   recordStage(
     stage: SyncStageName,
     durationMs: number,
-    meta: { queryName?: string; traceId?: string; measuredAtMs?: number } = {},
+    meta: { queryName?: string; traceId?: string; measuredAtMs?: number; matchedQueryCount?: number } = {},
   ): void {
     recordStageSample(stage, durationMs, meta);
   },
@@ -665,6 +726,7 @@ export const syncMetrics = {
     state.invalidations.fromTimer = 0;
     state.invalidations.fromManual = 0;
     state.invalidationsBySseName.clear();
+    pendingSseInvalidationTraces.clear();
     state.ipcAssertTimedOut = undefined;
     state.ipcAssertLastClient = null;
     state.ipcAssertion.length = 0;

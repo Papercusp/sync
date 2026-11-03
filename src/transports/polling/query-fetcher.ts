@@ -483,6 +483,7 @@ export function getQueryFetcher(
       else signal.addEventListener('abort', onCallerAbort, { once: true });
     }
     const startedAtMs = nowMs();
+    const invalidationTraceIds = syncMetrics.consumeSseInvalidationTraceIds(name, args);
     const meta: RequestMeta = {
       traceId: createSyncTraceId('query'),
       sentAtMs: null,
@@ -601,6 +602,7 @@ export function getQueryFetcher(
         bytes: meta.bytes,
         outcome,
         traceId: meta.traceId,
+        ...(invalidationTraceIds.length > 0 ? { invalidationTraceIds } : {}),
         stages: {
           schedulerWaitMs: waitMs,
           ...(meta.resolverMs === null ? {} : { resolverMs: meta.resolverMs }),

@@ -11,10 +11,11 @@
  * table missing its invalidation bridge entry.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { cleanup, render } from '@testing-library/react';
 import { SSE_DRIFT_REPAIR_DEFAULT_MS, SSEAdapter } from './SSEAdapter';
 import { getQueryClient } from '../polling/queryClient';
+import { syncMetrics } from '../../observability/metrics';
 import { INTEREST_REGROW_DEBOUNCE_MS } from './query-interest';
 // Real (the mock spreads ...actual) — the channel-key assertions are about
 // this function's genuine behaviour.
@@ -87,6 +88,56 @@ describe('invalidate key matching (the WI-6796 contract pin)', () => {
     });
     expect(qc.getQueryState(['sync', 'accounts.pool', {}])?.isInvalidated).toBe(true);
     expect(qc.getQueryState(['sync', 'accounts.pool', { workspaceId: 'w' }])?.isInvalidated).toBe(true);
+  });
+});
+
+describe('SSE invalidation/query trace correlation', () => {
+  const RealEventSource = (globalThis as Record<string, unknown>).EventSource;
+
+  beforeEach(() => {
+    controlStreamOpts.length = 0;
+    getQueryClient().clear();
+    syncMetrics.__resetForTests();
+    (globalThis as Record<string, unknown>).EventSource = class {};
+  });
+
+  afterEach(() => {
+    cleanup();
+    getQueryClient().clear();
+    if (RealEventSource === undefined) delete (globalThis as Record<string, unknown>).EventSource;
+    else (globalThis as Record<string, unknown>).EventSource = RealEventSource;
+  });
+
+  it('counts and links only active query keys matched by an invalidation', () => {
+    const queryClient = getQueryClient();
+    const openArgs = { scope: 'open' };
+    const closedArgs = { scope: 'closed' };
+    queryClient.setQueryData(['sync', 'plans.attention', openArgs], []);
+    queryClient.setQueryData(['sync', 'plans.attention', closedArgs], []);
+    const observer = new QueryObserver(queryClient, {
+      queryKey: ['sync', 'plans.attention', openArgs],
+      queryFn: async () => [],
+      staleTime: Infinity,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+
+    render(<SSEAdapter>{null}</SSEAdapter>);
+    const handlers = controlStreamOpts.at(-1)!.handlers as Record<string, (data: string) => void>;
+    handlers.invalidate(JSON.stringify({
+      name: 'plans.attention',
+      args: { scope: 'open' },
+      tsMs: Date.now(),
+    }));
+
+    const receipt = syncMetrics.recentStages().find((stage) => stage.stage === 'eventReceipt')!;
+    expect(receipt).toMatchObject({
+      queryName: 'plans.attention',
+      matchedQueryCount: 1,
+      traceId: expect.stringMatching(/^sse-/),
+    });
+    expect(syncMetrics.consumeSseInvalidationTraceIds('plans.attention', openArgs)).toEqual([receipt.traceId]);
+    expect(syncMetrics.consumeSseInvalidationTraceIds('plans.attention', closedArgs)).toEqual([]);
+    unsubscribe();
   });
 });
 

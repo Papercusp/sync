@@ -164,6 +164,17 @@ describe('getQueryFetcher — request shape', () => {
     expect(syncMetrics.snapshot().stages?.byStage.resolver).toMatchObject({ unit: 'ms', count: 1 });
   });
 
+  it('attaches matching SSE invalidation trace ids to one query completion', async () => {
+    const args = { status: 'open', workspaceId: 'w' };
+    syncMetrics.recordSseInvalidationTrace('plans.list', args, 'sse-42');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(okResponse({ rows: [], version: 'v1' })));
+
+    await getQueryFetcher(ep())('plans.list', { workspaceId: 'w', status: 'open' });
+
+    expect(syncMetrics.recentQueries().at(-1)?.invalidationTraceIds).toEqual(['sse-42']);
+    expect(syncMetrics.consumeSseInvalidationTraceIds('plans.list', args)).toEqual([]);
+  });
+
   it('appends the token query param when provided', async () => {
     const mockFetch = vi.fn().mockResolvedValue(okResponse({ rows: [], version: 'v1' }));
     vi.stubGlobal('fetch', mockFetch);

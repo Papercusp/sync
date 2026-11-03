@@ -391,14 +391,44 @@ describe('freshness stage telemetry (P-022)', () => {
       queryName: 'plans.list',
       traceId: 'sse-test',
       receivedAtMs: 1_125,
+      matchedQueryCount: 2,
     });
     const stages = syncMetrics.snapshot().stages!;
     expect(stages.byStage.commit).toMatchObject({ unit: 'ms', count: 1, lastDurationMs: 0 });
     expect(stages.byStage.eventReceipt).toMatchObject({ unit: 'ms', count: 1, lastDurationMs: 125 });
     expect(stages.recent.slice(-2)).toEqual([
       { stage: 'commit', unit: 'ms', durationMs: 0, measuredAtMs: 1_000, queryName: 'plans.list', traceId: 'sse-test' },
-      { stage: 'eventReceipt', unit: 'ms', durationMs: 125, measuredAtMs: 1_125, queryName: 'plans.list', traceId: 'sse-test' },
+      { stage: 'eventReceipt', unit: 'ms', durationMs: 125, measuredAtMs: 1_125, queryName: 'plans.list', traceId: 'sse-test', matchedQueryCount: 2 },
     ]);
+  });
+
+  it('consumes matching invalidation traces once and bounds keys and ids', () => {
+    const args = { status: 'open', workspaceId: 'w' };
+    for (let i = 1; i <= 9; i++) {
+      syncMetrics.recordSseInvalidationTrace('plans.list', args, 'sse-' + i);
+    }
+    expect(syncMetrics.consumeSseInvalidationTraceIds('plans.list', {
+      workspaceId: 'w',
+      status: 'open',
+    })).toEqual(['sse-2', 'sse-3', 'sse-4', 'sse-5', 'sse-6', 'sse-7', 'sse-8', 'sse-9']);
+    expect(syncMetrics.consumeSseInvalidationTraceIds('plans.list', args)).toEqual([]);
+
+    for (let i = 0; i <= 400; i++) {
+      syncMetrics.recordSseInvalidationTrace('query-' + i, {}, 'sse-key-' + i);
+    }
+    expect(syncMetrics.consumeSseInvalidationTraceIds('query-0', {})).toEqual([]);
+    expect(syncMetrics.consumeSseInvalidationTraceIds('query-1', {})).toEqual(['sse-key-1']);
+  });
+
+  it('expires unconsumed invalidation traces after 30 seconds', () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    try {
+      syncMetrics.recordSseInvalidationTrace('plans.list', {}, 'sse-expiring');
+      clock.mockReturnValue(31_000);
+      expect(syncMetrics.consumeSseInvalidationTraceIds('plans.list', {})).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('queryCompleted wires the scheduler, resolver, transfer, and parse/cache writers', () => {
@@ -410,6 +440,7 @@ describe('freshness stage telemetry (P-022)', () => {
       bytes: 100,
       outcome: 'ok',
       traceId: 'query-test',
+      invalidationTraceIds: ['sse-test'],
       stages: { schedulerWaitMs: 7, resolverMs: 5, transferMs: 8, parseCacheMs: 2 },
     });
     const byStage = syncMetrics.snapshot().stages!.byStage;
@@ -417,7 +448,10 @@ describe('freshness stage telemetry (P-022)', () => {
     expect(byStage.resolver.lastDurationMs).toBe(5);
     expect(byStage.transfer.lastDurationMs).toBe(8);
     expect(byStage.parseCache.lastDurationMs).toBe(2);
-    expect(syncMetrics.recentQueries()[0]).toMatchObject({ traceId: 'query-test' });
+    expect(syncMetrics.recentQueries()[0]).toMatchObject({
+      traceId: 'query-test',
+      invalidationTraceIds: ['sse-test'],
+    });
   });
 });
 

@@ -279,10 +279,31 @@ function SSESubscriber({
           return;
         }
         const traceId = createSyncTraceId('sse');
+        const matchedQueries = queryClient.getQueryCache().findAll(
+          ev.args
+            ? {
+                queryKey: ['sync', ev.name, ev.args],
+                ...(parse === 'update' ? { exact: true } : {}),
+              }
+            : {
+                predicate: (query) =>
+                  Array.isArray(query.queryKey) &&
+                  query.queryKey[0] === 'sync' &&
+                  query.queryKey[1] === ev.name,
+              },
+        ).filter((query) => query.isActive());
+        if (parse === 'invalidate') {
+          for (const query of matchedQueries) {
+            if (Array.isArray(query.queryKey)) {
+              syncMetrics.recordSseInvalidationTrace(ev.name, query.queryKey[2], traceId);
+            }
+          }
+        }
         syncMetrics.sseEventReceived(data?.length ?? 0, ev.tsMs, {
           queryName: ev.name,
           traceId,
           receivedAtMs,
+          matchedQueryCount: matchedQueries.length,
         });
         // EI-19406583179082751: name-tag the counter so `logInvalidationsBySse()` can
         // attribute a push-volume anomaly to specific query names instead of only the
