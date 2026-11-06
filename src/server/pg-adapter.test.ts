@@ -9,7 +9,8 @@
  * to the host's `onListen` — the seam the operator wires to `cache.clearL1()`.
  */
 import { describe, it, expect } from 'vitest';
-import { createPgListenSource } from './pg-adapter';
+import { createInvalidationBus } from './invalidation-bus';
+import { createPgListenSource, createPgNotifySink, PG_NOTIFY_SAFE_PAYLOAD_BYTES } from './pg-adapter';
 import type { PgSqlLike } from './pg-adapter';
 
 /**
@@ -95,5 +96,34 @@ describe('createPgListenSource — onListen cold-bust hook', () => {
     await src.start(() => {});
     await src.stop?.();
     expect(fake.ended).toBe(true);
+  });
+});
+
+describe('createPgNotifySink — bounded invalidation payload', () => {
+  it('keeps UTF-8 NOTIFY payloads under PostgreSQL’s byte limit and preserves the event name', async () => {
+    const calls: unknown[][] = [];
+    const sql = ((strings: TemplateStringsArray, ...args: unknown[]) => {
+      calls.push(args);
+      return Promise.resolve([]);
+    }) as unknown as PgSqlLike;
+    const notify = createPgNotifySink({ getSql: () => sql });
+    expect(notify.maxPayloadBytes).toBe(PG_NOTIFY_SAFE_PAYLOAD_BYTES);
+    const bus = createInvalidationBus({
+      listen: { start: () => {} },
+      notify,
+    });
+
+    const args = { identity: 'é'.repeat(5_000) };
+    const sourcePayloadJson = JSON.stringify({ name: 'private.identity.prepared', args });
+    expect(new TextEncoder().encode(sourcePayloadJson).byteLength).toBeGreaterThan(8_000);
+
+    await bus.notifyInvalidate('private.identity.prepared', args);
+
+    expect(calls).toHaveLength(1);
+    const payloadJson = String(calls[0][1]);
+    const payloadBytes = new TextEncoder().encode(payloadJson).byteLength;
+    expect(payloadBytes).toBeLessThanOrEqual(PG_NOTIFY_SAFE_PAYLOAD_BYTES);
+    expect(payloadBytes).toBeLessThan(8_000);
+    expect(JSON.parse(payloadJson)).toEqual({ name: 'private.identity.prepared' });
   });
 });

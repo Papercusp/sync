@@ -46,6 +46,9 @@ export interface PgSqlLike {
 
 const DEFAULT_CHANNEL = 'sync_invalidate';
 
+/** PostgreSQL NOTIFY payloads must be under 8,000 bytes; leave a 1,000-byte margin. */
+export const PG_NOTIFY_SAFE_PAYLOAD_BYTES = 7_000;
+
 /**
  * A `ListenSource` backed by a dedicated postgres `LISTEN` connection.
  * `open()` is called once on `start()` to create the (long-lived,
@@ -95,6 +98,7 @@ export function createPgNotifySink(opts: {
 }): NotifySink {
   const channel = opts.channel ?? DEFAULT_CHANNEL;
   return {
+    maxPayloadBytes: PG_NOTIFY_SAFE_PAYLOAD_BYTES,
     async notify(payloadJson) {
       const sql = opts.getSql();
       await sql`SELECT pg_notify(${channel}, ${payloadJson})`;

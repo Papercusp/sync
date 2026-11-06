@@ -254,6 +254,33 @@ describe('invalidation-bus', () => {
     expect(events[0].args).toEqual({ k: 'v' });
   });
 
+  it('measures UTF-8 bytes and keeps a name-only invalidation when args are oversized', async () => {
+    const args = { label: 'é'.repeat(100) };
+    const original = JSON.stringify({ name: 'wide.query', args });
+    expect(original.length).toBeLessThan(150);
+    expect(new TextEncoder().encode(original).byteLength).toBeGreaterThan(150);
+
+    const clock = { t: 1000 };
+    const lb = makeLoopback();
+    const bus = createInvalidationBus({
+      listen: lb.listen,
+      notify: lb.notify,
+      now: () => clock.t,
+      payloadSizeLimit: 150,
+    });
+    const events: SyncEvent[] = [];
+    await bus.subscribe((e) => events.push(e));
+
+    await bus.notifyInvalidate('wide.query', args);
+
+    expect(lb.delivered).toHaveLength(1);
+    expect(JSON.parse(lb.delivered[0])).toEqual({ name: 'wide.query' });
+    expect(new TextEncoder().encode(lb.delivered[0]).byteLength).toBeLessThanOrEqual(150);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ id: 1, name: 'wide.query' });
+    expect(events[0].args).toBeUndefined();
+  });
+
   it('keeps small data payloads (update event)', async () => {
     const clock = { t: 1000 };
     const lb = makeLoopback();

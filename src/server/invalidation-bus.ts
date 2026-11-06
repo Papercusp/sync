@@ -10,7 +10,8 @@
  *     immediate-first/trailing-latest coalescing for bridged targets so a
  *     periodic reconcile burst cannot fan out a flicker storm or hide its
  *     final state behind a 90-second floor,
- *   - a 32KB payload cap (oversized → drop `data`, client refetches),
+ *   - a configurable UTF-8 payload cap (oversized → drop `data`, then `args`,
+ *     so the event name still triggers a broad invalidation + refetch),
  *   - an optional `bridge` that synthesizes extra events (e.g. a raw
  *     PG-trigger `<schema>.<table>.changed` → the camelCase query names
  *     that read that table).
@@ -67,6 +68,8 @@ export type BridgeTarget =
 
 /** Outbound transport: publish a JSON payload to all processes. */
 export interface NotifySink {
+  /** Optional hard ceiling imposed by the transport, measured in UTF-8 bytes. */
+  maxPayloadBytes?: number;
   notify(payloadJson: string): Promise<void>;
 }
 
@@ -136,7 +139,7 @@ export interface CreateInvalidationBusOptions {
    * hidden behind the 90-second burst window. Default 2_000.
    */
   bridgeCoalesceWindowMs?: number;
-  /** Serialized-payload byte cap; over → drop `data`. Default 32768. */
+  /** Serialized-payload UTF-8 byte cap; over → drop `data`, then `args`. Default 32768. */
   payloadSizeLimit?: number;
   /**
    * Synthesize extra invalidation targets from a raw event (e.g. a PG-trigger
@@ -230,6 +233,35 @@ export const DEFAULT_BRIDGE_COALESCE_WINDOW_MS = 2_000;
  */
 export const MAX_BRIDGE_COALESCE_WINDOW_MS = 15_000;
 const DEFAULT_PAYLOAD_SIZE_LIMIT = 32 * 1024;
+const utf8Encoder = new TextEncoder();
+
+function utf8ByteLength(value: string): number {
+  return utf8Encoder.encode(value).byteLength;
+}
+
+/**
+ * Keep a notification within its transport's byte limit without losing the
+ * invalidation itself. Snapshot data is optional, and args only narrow which
+ * cache entries are invalidated, so remove them in that order when needed.
+ */
+function serializeNotifyPayload(payload: Record<string, unknown>, sizeLimit: number): string | null {
+  let serialized = JSON.stringify(payload);
+  if (utf8ByteLength(serialized) <= sizeLimit) return serialized;
+
+  if (Object.prototype.hasOwnProperty.call(payload, 'data')) {
+    delete payload.data;
+    serialized = JSON.stringify(payload);
+    if (utf8ByteLength(serialized) <= sizeLimit) return serialized;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, 'args')) {
+    delete payload.args;
+    serialized = JSON.stringify(payload);
+    if (utf8ByteLength(serialized) <= sizeLimit) return serialized;
+  }
+
+  return null;
+}
 
 /** Keep the normal-path trailing bound an invariant, even if a host supplies a bad value. */
 function normalizeBridgeCoalesceWindow(value: number | undefined): number {
@@ -301,7 +333,20 @@ export function createInvalidationBus(
       ? DEFAULT_DEDUPE_WINDOW_MS
       : Math.max(0, configuredDedupeWindowMs);
   const bridgeCoalesceWindowMs = normalizeBridgeCoalesceWindow(opts.bridgeCoalesceWindowMs);
-  const payloadSizeLimit = opts.payloadSizeLimit ?? DEFAULT_PAYLOAD_SIZE_LIMIT;
+  const requestedPayloadSizeLimit = opts.payloadSizeLimit;
+  const configuredPayloadSizeLimit =
+    requestedPayloadSizeLimit === undefined || !Number.isFinite(requestedPayloadSizeLimit)
+      ? DEFAULT_PAYLOAD_SIZE_LIMIT
+      : Math.max(1, Math.floor(requestedPayloadSizeLimit));
+  const transportPayloadSizeLimit = opts.notify.maxPayloadBytes;
+  // A transport can impose a hard ceiling; host configuration may reduce it,
+  // but must never raise it above what the transport accepts.
+  const payloadSizeLimit =
+    transportPayloadSizeLimit !== undefined &&
+    Number.isFinite(transportPayloadSizeLimit) &&
+    transportPayloadSizeLimit >= 1
+      ? Math.min(configuredPayloadSizeLimit, Math.floor(transportPayloadSizeLimit))
+      : configuredPayloadSizeLimit;
   const bridge = opts.bridge ?? (() => [] as const);
   const now = opts.now ?? (() => Date.now());
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
@@ -694,14 +739,16 @@ export function createInvalidationBus(
     data?: unknown[],
     notifyOpts?: NotifyInvalidateOpts,
   ): Promise<void> {
-    let payload: Record<string, unknown> = { name };
+    const payload: Record<string, unknown> = { name };
     if (args !== undefined) payload.args = args;
-    if (data !== undefined) {
-      payload.data = data;
-      if (JSON.stringify(payload).length > payloadSizeLimit) {
-        payload = { name };
-        if (args !== undefined) payload.args = args;
-      }
+    if (data !== undefined) payload.data = data;
+    const payloadJson = serializeNotifyPayload(payload, payloadSizeLimit);
+    if (payloadJson === null) {
+      onError(
+        'notify-payload-size',
+        new RangeError(`invalidation name exceeds the configured ${payloadSizeLimit}-byte UTF-8 payload limit`),
+      );
+      return;
     }
 
     // Source-side dedupe. Data-bearing notifies hash the data into the key
@@ -724,12 +771,12 @@ export function createInvalidationBus(
     // coalesce window, never dropped. A data-bearing repeat with the same
     // content hash is a byte-identical duplicate, so it is still dropped.
     if (data === undefined) {
-      const leading = offerNotify(key, { ts, json: JSON.stringify(payload) }, effDedupeMs);
+      const leading = offerNotify(key, { ts, json: payloadJson }, effDedupeMs);
       if (leading !== null) await publishToSink(leading);
       return;
     }
     if (!shouldFanout(key, ts, effDedupeMs)) return;
-    await publishToSink(JSON.stringify(payload));
+    await publishToSink(payloadJson);
   }
 
   /**

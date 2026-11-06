@@ -50,6 +50,7 @@ export {
 export {
   createPgListenSource,
   createPgNotifySink,
+  PG_NOTIFY_SAFE_PAYLOAD_BYTES,
   type PgSqlLike,
 } from './pg-adapter';
 
